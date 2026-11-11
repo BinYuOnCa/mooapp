@@ -253,6 +253,7 @@ M1–M9 验收标准（照抄手册第 5 节）；ADR 没覆盖、需要我决�
 - [ ] 移走 secrets 文件后运行，给出清晰报错而不是一堆堆栈
 - [ ] 关掉 OpenD 后运行，几秒内提示ni无法连接
 - [ ] learnings.md 里有 unlock 的实测结论
+- [ ] 在 Claude Code 里运行 REAL 启动命令，必须被人锁拒绝
 
 ### M2 券商适配层与 FakeBroker
 
