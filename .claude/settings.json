@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/.config/mooapp/**)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Bash(* --env real*)"
+    ],
+    "ask": [
+      "Bash(git push *)"
+    ]
+  }
+}

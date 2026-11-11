@@ -1,0 +1,21 @@
+# 密钥与本地配置
+.env
+.env.*
+config/secrets.toml
+*.pem
+*.key
+
+# 运行产物（可能含账户信息）
+*.db
+*.sqlite
+logs/
+reports/
+recordings/
+
+# Python
+__pycache__/
+.venv/
+.pytest_cache/
+
+# Claude Code 个人设置
+.claude/settings.local.json
