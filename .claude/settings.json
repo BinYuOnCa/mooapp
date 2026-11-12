@@ -5,7 +5,8 @@
       "Read(./.env)",
       "Read(./.env.*)",
       "Bash(* --env real*)",
-      "Bash(*--env=real*)"
+      "Bash(*--env=real*)",
+      "Bash(moomoo:*)"
     ],
     "ask": [
       "Bash(git push *)"
@@ -14,7 +15,10 @@
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": false,
-    "allowUnsandboxedCommands": false
+    "allowUnsandboxedCommands": false,
+    "network":{
+        "allowUnixSockets":["/tmp/.s.PGSQL.5432"]
+     }
   },
   "hooks": {
     "PreToolUse": [

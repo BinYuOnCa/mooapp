@@ -1,0 +1,5 @@
+# 模板：复制为 config/db.local.toml（已被 .gitignore 忽略）后填写。
+# mooapp_sim 的专用随机密码，不得在别处使用。属于低等级凭据：Claude Code 在 sandbox 里能读，但不进 Git（SPEC Q20）。
+# 生成示例：openssl rand -base64 24
+[postgres]
+sim_password = "CHANGE_ME"

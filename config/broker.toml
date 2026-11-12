@@ -1,0 +1,8 @@
+# 由 scripts/stage0_smoke.py 自动生成，M1 直接使用
+# security_firm 不填：SDK 自动识别券商
+[opend]
+host = "127.0.0.1"
+port = 11111
+filter_trdmarket = "US"
+# 模拟账户号不是密钥，可以提交；实盘账户号不写进仓库
+simulate_acc_id = 2964165

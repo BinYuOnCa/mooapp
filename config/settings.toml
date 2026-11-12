@@ -1,0 +1,48 @@
+# mooapp 普通配置（可提交）。密钥只放 ~/.config/mooapp/secrets.toml。
+# 环境不在这里设置：默认 SIMULATE，进入 REAL 必须显式传 --env 参数并通过人锁（CLAUDE.md）。
+# 限额由你决定；Claude Code 不得修改 [risk.*] 的数值。
+
+# ---------------------------------------------------------------- 风控限额（M4）
+# 金额单位 USD；数量单位 股。代码格式为 moomoo 的 "市场.代码"。
+
+[risk.simulate]
+# 模拟盘：放宽，便于测试限流、部分成交等场景
+whitelist = ["US.SPY", "US.QQQ", "US.AAPL", "US.SCHD"]
+max_order_qty = 100              # 每单数量上限
+max_order_value = 5000.0         # 单笔金额上限
+max_position_qty = 200           # 单票持仓上限
+max_daily_orders = 50            # 当日下单次数上限
+max_daily_loss = 500.0           # 当日亏损上限
+halt_on_daily_loss = true        # 触及当日亏损上限后自动 halt
+max_limit_deviation_pct = 5.0    # 限价偏离最新价超过此百分比则拒单
+regular_hours_only = true        # 只允许常规交易时段（ADR-0003）
+
+[risk.real]
+# 实盘微仓：手册第 7 节示例值，"全亏光也只当学费"
+# 白名单：1–2 只单价较低、流动性好的 ETF；上线前核对现价低于 max_order_value
+whitelist = ["US.SCHD"]
+max_order_qty = 1
+max_order_value = 100.0
+max_position_qty = 2
+max_daily_orders = 10
+max_daily_loss = 20.0
+halt_on_daily_loss = true
+max_limit_deviation_pct = 2.0    # 第 7 节未给出，示例值，待你定
+regular_hours_only = true
+
+# ---------------------------------------------------------------- 行情（M6、M9）
+[quote]
+stale_after_seconds = 30         # 行情超过 N 秒未更新则告警（M9 健康检查）
+poll_fallback_seconds = 5        # 推送中断时轮询快照的间隔
+
+# ---------------------------------------------------------------- 邮件通知（M5）
+# SMTP 服务器和密码在 secrets.toml 的 [smtp] 段
+[notify.email]
+enabled = true
+recipients = ["yubin.tamu@gmail.com"]  # 替换为你的收件地址
+merge_partial_fills_seconds = 60   # 部分成交在此时间窗内合并为一封
+heartbeat_minutes_before_open = 30 # 开盘前多少分钟发「系统正常」心跳
+
+# ---------------------------------------------------------------- Agent（M8）
+[agent]
+auto_approve_simulate = false      # SIMULATE 下 Agent 提议是否自动批准（SPEC Q9）；REAL 永远需要你批准

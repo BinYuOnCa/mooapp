@@ -1,0 +1,9 @@
+# PostgreSQL 连接参数（可提交，不含密码）。数据库本身是本项目之外的基础设施（ADR-0024）。
+# 只连本机：host 只能是 unix socket 目录或 127.0.0.1，否则程序拒绝启动（ADR-0014，SPEC Q20）。
+# 默认走 unix socket：Claude Code 的 sandbox 只放行 /tmp/.s.PGSQL.5432，不放行本机 TCP（ADR-0015 注记）。
+[postgres]
+host = "/tmp"              # unix socket 目录；PostgreSQL 仍只监听回环地址 5432 端口
+port = 5432
+dbname = "mooapp"
+sim_role = "mooapp_sim"     # 只拥有 schema simulate；密码在 config/db.local.toml
+real_role = "mooapp_real"   # 只拥有 schema real；密码在 ~/.config/mooapp/secrets.toml
