@@ -42,3 +42,26 @@ def test_moomoo_only_in_broker():
             for ln in moomoo_imports(p):
                 bad.append(f"{p.relative_to(REPO)}:{ln}")
     assert not bad, f"只有 broker/ 与 scripts/ 可以 import moomoo：{bad}"
+
+
+WRITE_METHODS = {"place_order", "cancel_order", "modify_order", "unlock_trade"}
+
+
+def write_calls(p: Path) -> list[str]:
+    tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+    return [
+        f"{node.lineno}:{node.func.attr}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in WRITE_METHODS
+    ]
+
+
+def test_write_calls_only_in_broker():
+    """SPEC 5.4 防绕过（M2 先管住 src/）：券商写方法只在 broker/ 里调用。
+    M3 加 oms/executor.py 后放行它；M4 再加 GateTicket 检查。tests/contract 在 M2 直接调用（你确认的第 1 点），不在扫描范围。"""
+    bad = []
+    for p in SRC.rglob("*.py"):
+        if p.is_relative_to(BROKER):
+            continue
+        bad += [f"{p.relative_to(REPO)}:{c}" for c in write_calls(p)]
+    assert not bad, f"券商写方法只能在 broker/ 中调用：{bad}"
