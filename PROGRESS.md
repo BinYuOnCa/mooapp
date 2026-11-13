@@ -1,7 +1,7 @@
 # PROGRESS
 
-**当前**：M1 完成（2026-11-12）：验收 5 条全部通过；`pytest` 68 passed、`pytest -m pg` 3 passed、`pytest -m sim` 7 passed；结论已写入 learnings「M1 连通与配置」。等你审 diff、提交、`git tag m1`
-**下一步**：新会话中给出 M2（券商适配层与 FakeBroker）计划，你确认后再写代码
+**当前**：M2 计划已确认（2026-11-12）；执行第 1 步：探针 `scripts/probe_m2.py`、`scripts/probe_m2_partial_fill.py` 已写好，`pytest` 74 passed
+**下一步**：你在常规时段用 `!` 运行两个探针；结论写进 learnings 后再写测试
 
 ## 已完成
 
@@ -31,6 +31,43 @@
     - 新增 `tests/conftest.py`（假配置 fixture）
     - `ConfigUnreadable`：区分「不存在」和「无权读取」
     - 探针还读了 `settings.toml` 的白名单（R6），仍通过 `mooapp.config`
+
+## M2 计划（已确认 2026-11-12）
+
+目标：SPEC 8 节 M2 三条验收。不做 REAL、OMS、闸门；MoomooBroker 遇到 `Env.REAL` 直接拒绝（REAL 在 M4）。
+
+### vendor 发现（改动原设计）
+
+- `deal_list_query` 只支持实盘（§ Get Today's Deals）：模拟盘成交只靠 `dealt_qty` 增量，id 合成为 `order_id:累计成交量`
+- `order_fee_query` 不支持模拟账户（§ Get Order Fee）：P7 由文档回答，探针只记报错原文
+- `SysConfig.enable_console_log(False)`（§ Enable console logging）：关掉 SDK 控制台日志
+- 模拟账户 `average_cost` 无效（§ Get Positions）：`Position.avg_cost` 为 `Decimal | None`
+
+### 你确认的点
+
+1. 模拟盘契约测试在 M2 直接调用 `BrokerPort.place_order`（尚无闸门；只 SIMULATE，只由你用 `-m sim` 跑）
+2. 验收 2：`US.SPY` 限价 = 最新价 × 0.9、1 股、连下 20 笔后全部撤销；限流 15 次/30 秒，窗口加 1 秒余量。**验收测试走做法 C**：Claude 在聊天里贴草稿，你复制到 `tests/acceptance/` 审核、修改；以后对该目录的修改也只由你手工进行
+3. 验收 3：`US.SPY` 100 股限价 = 卖一价，60 秒未到终态就撤剩余，已成交部分市价卖回；录不到部分成交就停下问你
+4. remark 格式 `moo:<32 位 uuid4 hex>`；不以 `moo:` 开头的（含 `probe:`）都是外部订单
+5. 模拟盘的合成成交在 broker 层生成，经 `on_fill` 送出
+6. `OrderRequest` 构造时校验（价格必须在最小变动单位上，不自动取整）
+7. `subscribe_quotes` 的 Moomoo 实现推到 M6；重连只依赖 SDK 自带重连，完整验收在 M9
+8. `BrokerOrder.kind` 为 `OrderKind | None`（None = 非 v1 类型的外部订单）
+
+### 文件
+
+- 新增：`src/mooapp/clock.py`；`src/mooapp/broker/` 下 `port.py`、`convert.py`、`throttle.py`、`moomoo.py`、`recorder.py`、`fake.py`；`scripts/probe_m2.py`、`scripts/probe_m2_partial_fill.py`
+- 修改：`common.py`（Side、OrderKind、Source）、`broker/opend.py`（异常改从 port 导入、关控制台日志、TCP 预检快速失败）、`ops/doctor.py`（仅导入路径）；收尾改 learnings、PROGRESS
+- 测试：`tests/unit/` 下 `test_order_request.py`、`test_convert.py`、`test_throttle.py`、`test_moomoo_broker.py`，`test_layering.py` 加一条；`tests/contract/test_broker_contract.py`（Fake 默认，sim 由你跑）
+- 不改：风控限额、`tests/acceptance/`、`.claude/`、`config/*.toml`；无新依赖
+
+### 执行顺序
+
+1. 探针（常规时段，你用 `!` 跑）→ learnings
+2. 写测试，确认失败，原样贴结果；**停下等你确认**；同时贴验收测试草稿（做法 C）
+3. 写实现直到 `pytest` 通过
+4. 你用 `!` 跑 `pytest -m sim` 和你的验收测试；推送录在 `recordings/pushes/`
+5. learnings、PROGRESS；你审 diff、提交、`git tag m2`
 
 ## M1 计划（已确认 2026-11-11，已完成 2026-11-12；保留作记录）
 
