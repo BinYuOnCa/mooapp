@@ -1,4 +1,4 @@
-"""共享基础类型（SPEC 5.1）。M1 只需要 Env、MooappError、mask_account。"""
+"""共享基础类型（SPEC 5.1）。时钟在 mooapp/clock.py。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,25 @@ from enum import StrEnum
 class Env(StrEnum):
     SIMULATE = "SIMULATE"
     REAL = "REAL"
+
+
+class Side(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class OrderKind(StrEnum):
+    """v1 只有限价和市价（ADR-0004）。"""
+
+    LIMIT = "LIMIT"
+    MARKET = "MARKET"
+
+
+class Source(StrEnum):
+    CLI = "cli"
+    RULE = "rule"
+    AGENT = "agent"
+    SYSTEM = "system"
 
 
 class MooappError(Exception):

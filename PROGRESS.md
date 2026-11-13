@@ -1,7 +1,7 @@
 # PROGRESS
 
-**当前**：M2 第 1 步完成（2026-11-13）：探针结论写入 learnings「M2 券商适配层：探针结论」。P3 时间为美东时间；P4、P7 模拟盘查不到成交记录和费用；P5 当日买入可卖；模拟盘整单一次成交（SPY 100 股、TD 1000 股都试过），录不到部分成交 → 你决定改验收口径
-**下一步**：M2 第 2 步进行中：测试已写好、确认全部失败（缺模块），验收测试草稿已贴；**等你确认测试**后写实现
+**当前**：M2 第 4 步完成（2026-11-13）：实现完成，`pytest` 180 passed（含 FakeBroker 部分成交 2 项，覆盖验收第 3 条后半句）；你在常规时段跑的模拟盘契约测试 7 passed、验收测试 1 passed，推送录在 `recordings/pushes/SIMULATE_20261113T184058Z.jsonl`
+**下一步**：你审 M2 diff、提交、`git tag m2`；SPEC 8 节验收第 3 条改口径（你手工改）。之后进入 M3 计划
 
 ## 已完成
 
@@ -141,7 +141,8 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 ## 待你处理
 
 - [ ] SPEC 8 节 M2 验收第 3 条改口径（你手工改）：模拟盘只录「整单成交 + 撤单」，部分成交由 FakeBroker 注入的推送覆盖（learnings「M2 › 模拟盘不会部分成交」）
-- [ ] 提交 `docs/learnings.md`、`PROGRESS.md` 中第二次部分成交探针的结论（探针与 `settings.toml` 已在 05e484f 提交）
+- [x] 提交 `docs/learnings.md`、`PROGRESS.md` 中第二次部分成交探针的结论（ef26879）
+- [ ] 审 M2 实现 diff（`src/mooapp/clock.py`、`common.py`、`broker/` 下 7 个文件）、learnings、PROGRESS，提交，`git tag m2`
 
 - [x] 核对 `config/settings.toml`：`[risk.real]` 白名单 ETF 与现价、`max_limit_deviation_pct`、`[risk.simulate]` 数值、邮件收件人
 - [x] 在 secrets 里填 `[accounts] real_acc_id`（2026-11-12 doctor 显示「real_acc_id 已填」）
@@ -159,9 +160,11 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 - PATH 上的 `psql` / `pg_isready` 是 14.12 客户端（来自 `postgresql@14`），服务端是 17；工具要用 `/opt/homebrew/opt/postgresql@17/bin/` 下的版本
 - Claude 连不上 OpenD：`mooapp doctor`、`pytest -m sim`、探针、模拟盘验收都由你用 `!` 运行；sandbox 内 `import moomoo` 也会失败
 - 撤单是异步的：`modify_order(CANCEL)` 返回成功后立即查询仍是 `SUBMITTED`。M2 探针要轮询到终态；M3 OMS 按待撤销状态处理
-- OpenD 拒绝连接时 SDK 进入 `WAIT_RECONNECT` 而不报错，doctor 要等满 5 秒才提示
+- ~~OpenD 拒绝连接时 SDK 进入 `WAIT_RECONNECT` 而不报错，doctor 要等满 5 秒才提示~~：M2 已加 TCP 预检，端口拒绝时 1 秒内报错且不加载 SDK
+- 订单方向为 `SELL_SHORT` / `BUY_BACK` 的外部订单会让 `query_orders` 报 BrokerError（v1 只有 BUY / SELL；是否映射属于业务决策，ADR 未覆盖，遇到再议）
+- SDK 会接住推送回调里的异常、只写进 SDK 日志：`MoomooBroker` 先用 logging 记 ERROR 再抛出（learnings「M2 实现」）；常驻进程要配置 logging 落盘（M9）
 - sandbox 内 doctor 的 secrets 项：改为区分「无权读取」后未在 sandbox 内复验（Claude 不得访问 `~/.config/mooapp/`）
-- SDK 日志打印到控制台；`set_all_thread_daemon(True)` 触发 SDK 内部的 DeprecationWarning（Python 3.15）
+- ~~SDK 日志打印到控制台~~（M2 已用 `enable_console_log(False)` 关掉）；`set_all_thread_daemon(True)` 触发 SDK 内部的 DeprecationWarning（Python 3.15）
 
 ## M1 前置条件（全部满足）
 

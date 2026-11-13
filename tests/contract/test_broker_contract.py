@@ -26,6 +26,7 @@ from mooapp.broker.fake import FakeBroker
 from mooapp.broker.moomoo import open_broker
 from mooapp.broker.port import (
     TERMINAL_STATUSES,
+    BrokerError,
     BrokerFill,
     BrokerOrder,
     NotSupported,
@@ -225,6 +226,57 @@ def test_marketable_buy_fills_and_emits_one_fill(h: Harness):
             h.wait_status(sell.broker_order_id, {"FILLED_ALL"}, FILL_TIMEOUT)
         else:
             cancel_all(h, [buy])
+
+
+# ------------------------------------------------------------------ 部分成交（只跑 Fake）
+# 模拟盘整单一次成交、录不到部分成交（learnings「M2 › 模拟盘不会部分成交」）；
+# 你 2026-11-13 改验收口径：部分成交由 FakeBroker 注入推送覆盖（SPEC 8 节 M2 第 3 条）。
+
+
+def place_100(h: FakeHarness) -> tuple[OrderRequest, BrokerOrder]:
+    req = OrderRequest(new_client_order_id(), SYMBOL, Side.BUY, 100, OrderKind.LIMIT, Decimal("759.58"))
+    o = h.broker.place_order(req)
+    h.fake.step()  # SUBMITTING → SUBMITTED
+    return req, o
+
+
+def test_fake_partial_fills_then_cancel():
+    h = FakeHarness()
+    req, o = place_100(h)
+    oid = o.broker_order_id
+    h.fake.fill(oid, 40, Decimal("759.50"))
+    h.fake.fill(oid, 30, Decimal("759.60"))
+    h.broker.cancel_order(oid)
+    h.fake.step()
+    assert [u.raw_status for u in h.updates if u.broker_order_id == oid] == [
+        "SUBMITTING",
+        "SUBMITTED",
+        "FILLED_PART",
+        "FILLED_PART",
+        "CANCELLED_PART",
+    ]
+    mine = [f for f in h.fills if f.broker_order_id == oid]
+    assert [(f.fill_id, f.qty, f.price, f.client_order_id, f.synthetic) for f in mine] == [
+        (f"{oid}:40", 40, Decimal("759.50"), req.client_order_id, True),
+        (f"{oid}:70", 30, Decimal("759.60"), req.client_order_id, True),  # 由累计均价反推
+    ]
+    final = h.order(oid)
+    assert (final.raw_status, final.dealt_qty, final.is_terminal) == ("CANCELLED_PART", 70, True)
+    assert {p.symbol: p.qty for p in h.broker.query_positions()}[SYMBOL] == 70
+
+
+def test_fake_partial_fills_to_full():
+    h = FakeHarness()
+    _, o = place_100(h)
+    oid = o.broker_order_id
+    h.fake.fill(oid, 40, Decimal("759.50"))
+    h.fake.fill(oid, 60, Decimal("759.55"))
+    assert [u.raw_status for u in h.updates if u.broker_order_id == oid][-2:] == ["FILLED_PART", "FILLED_ALL"]
+    assert [(f.qty, f.price) for f in h.fills] == [(40, Decimal("759.50")), (60, Decimal("759.55"))]
+    final = h.order(oid)
+    assert (final.dealt_qty, final.dealt_avg_price) == (100, Decimal("759.53"))  # (40×759.50 + 60×759.55) ÷ 100
+    with pytest.raises(BrokerError):  # 终态不能再撤：FakeBroker 报错，与 MoomooBroker 遇 ret≠0 一致
+        h.broker.cancel_order(oid)
 
 
 # ------------------------------------------------------------------ 只读

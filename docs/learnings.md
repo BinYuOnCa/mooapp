@@ -309,3 +309,22 @@ App 里当天模拟账户的 5 张订单与录制一致（你 2026-11-13 核对�
 - **快照有 `ask_vol`、`bid_vol`**：快照的 `update_time` 也是美东时间
 - **同一笔买卖成交价相同**：US.TD 买 1000 股（限价 124.02）与随后市价卖 1000 股都成交在 123.965，介于下单时的买一价 123.93 和卖一价 124.02 之间。模拟盘的成交价看来取撮合时的某个参考价，不是盘口价
 - **`SysConfig.enable_console_log(False)` 有效**：第二次部分成交探针的终端输出里只有探针自己打印的 JSON 行，没有 SDK 的连接/断开日志（你 2026-11-13 贴的终端输出）。`broker/opend.py` 按计划加上这一行
+
+## M2 券商适配层：实现与模拟盘契约测试（2026-11-13）
+
+#### 推送回调里抛出的异常会被 SDK 接住，只写进 SDK 自己的日志
+
+- **结论**：SDK 在 `packet_callback` 里用 `try … except Exception` 包住 handler 的 `on_recv_rsp`，异常只以 `logger.warning(..., exc_info=True)` 写进 SDK 日志（`~/.com.moomoo.OpenD/Log/`），不会传到我们的代码，关掉控制台日志后终端上也看不到
+- **依据**：读 SDK 源码（未实测）
+- **出处**：SDK 10.12.7208 `moomoo/common/open_context_base.py` `packet_callback`；vendor § Orders Push Callback 未写明
+- **影响**：`MoomooBroker` 的推送处理先用 Python `logging` 记 ERROR（默认打到 stderr）再抛出，不让错误只留在 SDK 日志里。M3 的 OMS 回调出错时同样会走这条路径；常驻进程（M9）要配置 logging 落盘
+
+#### 模拟盘契约测试：限流、撤单、整单成交、合成成交全部按预期
+
+- **结论**：`tests/contract/test_broker_contract.py`（sim）7 项通过，用时 50.7 秒；验收测试 `tests/acceptance/test_m2_rate_limit.py` 通过，用时 34.1 秒，20 笔不出现限频错误。录到 23 张单共 69 条推送，每张单都是 `SUBMITTING` → `SUBMITTED` → 终态（21 张 `CANCELLED_ALL`，2 张 `FILLED_ALL`）；23 张单的 remark 都是 `moo:` 格式并在推送里原样带回
+- **成交**：限价买 1 股 @ 754.22，5.4 秒后整单成交，均价 752.70；随后市价卖 1 股，8.6 秒后成交，均价 752.68。每张单只生成一条合成成交（`fill_id = order_id:1`）
+- **推送行字段**：比 vendor § Orders Push Callback 的列表多 `jp_acc_type`；没有 `acc_id` 字段
+- **依据**：实测（你 2026-11-13 在常规时段用 `uv run pytest -m sim` 运行）
+- **出处**：`src/mooapp/broker/`（M2 实现，未提交）
+- **记录**：`recordings/pushes/SIMULATE_20261113T184058Z.jsonl`（契约测试；验收测试未开录制）；SDK 10.12.7208，OpenD 1012
+- **影响**：M2 验收 1、2 在模拟盘通过；验收 3 按改后的口径（整单成交 + 撤单）已有录制，部分成交由 FakeBroker 覆盖。这份录制是 M3 回放的输入
