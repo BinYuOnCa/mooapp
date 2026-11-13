@@ -1,7 +1,9 @@
 # PROGRESS
 
 **当前**：M3 第 3 步完成（2026-11-13）：OMS 核心实现完成，`pytest` 403 passed，`pytest -m pg` 25 passed（Claude 在 sandbox 内运行）。计划见下方「M3 计划」
-**下一步**（第 4 步，你用 `!` 运行）：探针 P9（收盘前后与次日）；`mooapp db migrate`（simulate schema）；常规时段跑 `pytest -m sim` 和 `tests/acceptance/test_m3_*.py`。之后写 learnings 的 P9 结论，你审 diff、提交、`git tag m3`
+**下一步**（第 4 步，你用 `!` 运行）：探针 P9 次日 `--check 841874 841875`；常规时段（周一）跑 `pytest -m sim` 和 `tests/acceptance/test_m3_*.py`。之后写 learnings 的 P9 结论；验收通过后 `/milestone-git finish 3`（合并到 main，tag `accept/milestone_3`）。周末先在 `dev/milestone_4`（从 `dev/milestone_3` 拉出）推进 M4
+
+**Git 命名**（2026-11-13 起）：分支 `dev/milestone_N`（合并后保留），tag `accept/milestone_N`（打在 main 的合并提交上）；旧的 m1、m2 tag 与 m2、m3 分支已改成新名字。流程见 `.claude/skills/milestone-git/SKILL.md`（`/milestone-git <start|commit|finish|push|status> <N>`）
 
 ## M3 计划（已确认 2026-11-13）
 
@@ -171,7 +173,9 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 - [ ] M3：确认是否所有 `order_list_query` 都限流（目前只限 refresh=True）
 - [ ] M3：跑探针 P9：`! uv run python scripts/probe_m3_expiry.py`（美东 15:45–16:00），次日 `--check <order_id>`；App 里删一张远离市价的单后再 `--check`
 - [ ] M3：`! uv run mooapp db migrate`；常规时段 `! uv run pytest -m sim` 与 `! uv run pytest -m sim tests/acceptance/test_m3_idempotent_retry.py tests/acceptance/test_m3_restart_recovery.py`
-- [ ] M3：审 diff 与两份 fixture，提交，`git tag m3`
+- [x] M3：审 diff 与两份 fixture，提交（aff9fee、600d29e）
+- [ ] M3：验收通过后 `/milestone-git finish 3`（tag `accept/milestone_3`）
+- [ ] 提交 `.claude/skills/milestone-git/`（你本人提交：`.claude/` 由你维护）
 
 - [ ] SPEC 8 节 M2 验收第 3 条改口径（你手工改）：模拟盘只录「整单成交 + 撤单」，部分成交由 FakeBroker 注入的推送覆盖（learnings「M2 › 模拟盘不会部分成交」）
 - [x] 提交 `docs/learnings.md`、`PROGRESS.md` 中第二次部分成交探针的结论（ef26879）
