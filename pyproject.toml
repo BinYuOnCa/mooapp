@@ -4,4 +4,27 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "moomoo-api>=10.12.7208",
+    "pydantic>=2.7",
+    "typer>=0.12",
+    "psycopg[binary]>=3.2",
+]
+
+[project.scripts]
+mooapp = "mooapp.ops.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.14"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not sim and not pg'"
+markers = [
+    "sim: 连接模拟盘 OpenD（需要 OpenD 在线；sandbox 不放行，由你用 ! 运行）",
+    "pg: 连接本机 PostgreSQL 测试库 mooapp_test（经 unix socket）",
 ]

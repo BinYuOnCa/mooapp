@@ -146,9 +146,103 @@ CLAUDE.md 的规定是：「文档不明确时写探针脚本在模拟盘实测�
 - 美股最小价格变动单位：< $1 为 $0.0001，≥ $1 为 $0.01（vendor FAQ Q14；§ Place Orders › price）。本项目自己取整，不用 `adjust_limit`。
 - `order_fee_query` 用来查费用，要求 OpenD ≥ 8.2.4218（vendor § Get Order Fee）。模拟盘是否返回费用，待探针 P7。
 - 交易日历的 `trade_date_type` 有 `WHOLE`、`MORNING`、`AFTERNOON` 三种（vendor § TradeDateType）。美股半日市怎么标记，文档未写明，待探针 P8。
-- 一台电脑可以同时运行两个命令行版 OpenD，各用不同的 `api_port`（vendor FAQ Q17）；同一账户最多 10 个 OpenD 同时登录（FAQ Q8）。「一个 OpenD 解锁后另一个是否仍锁定」文档未写明，REAL 阶段前由你手动验证。
+- ~~一台电脑可以同时运行两个命令行版 OpenD，各用不同的 `api_port`（vendor FAQ Q17）；同一账户最多 10 个 OpenD 同时登录（FAQ Q8）。~~ **更正**：上面这句把两条 FAQ 拼在一起，推出「同一账户可在同一台电脑上开两个 OpenD」，原文不支持，实验也否定了：
+  - vendor FAQ Q8（第 27795–27797 行）：一个账户可以在**多台机器**上登录 OpenD 或其他客户端，最多 10 个 OpenD 同时在线；高级行情权限只有一个终端能拿到。
+  - vendor FAQ Q17（第 27861–27896 行）：一台电脑同时跑两个 OpenD 只有命令行版支持，可视化版不支持；示例的两份 `OpenD.xml` 用的是不同的 `login_account`（Account 1、Account 2），不同的 `api_port`（11111、11112）。原文没有直说「必须是不同账户」，但给出的做法只有不同账户。
+  - **手动实验（你做的，不是探针）**：同一台 Mac 上，第一个 OpenD 已登录时，用**同一个 moomoo 账户**启动第二个 OpenD，登录失败。第一次实验的时间未记录；复测在 2026-11-12 约 21:00 EST（复测后 21:07 EST 写入），记录如下。第二个 OpenD（命令行版）的输出原文：
+    ```
+    Login Method: Log in with Account and Password
+    Logging in
+    Login failed,User is already logged in on this device
+    Please enter account
+    ```
+    组合结果：
+        
+    | 第一个 OpenD | 第二个 OpenD | 结果 |
+    |-----------| ----- | --- |
+    | 命令行       | 命令行 | 失败，`User is already logged in on this device` |
+    | 可视化（UI）   | 命令行 | 失败，同上 |
+    | 命令行       | 可视化（UI） | 失败，提示同样是 `User is already logged in on this device` |
+  
+        限制在「同一设备」上（on this device），和 Q8 说的「多台机器」对得上；跟第一个 OpenD 是哪种版本无关。
+  
+  - 结论：同一台电脑上的两个 OpenD 必须登录不同的 moomoo 账户。本项目的 SIMULATE 与 REAL 账户在同一个登录账户下（`get_acc_list` 一次返回 REAL ****9247 和 SIMULATE ****4165），所以「同机双 OpenD 分别服务 SIMULATE 和 REAL」在现有账户下做不到。
+  - 「一个 OpenD 解锁后另一个是否仍锁定」仍未验证，而且只在下面的附加条件下才有意义。
 
 ### 工作方式
 
 - 问题清单的答复要写回正文。如果只填在表格里，正文仍写「见 Qn」，后续实现会照旧方案做。
 - 答复之间会互相牵动：Q14（账号放 secrets）与 sandbox 冲突；Q15（改用 PostgreSQL）连带出凭据（Q20）和故障处理（Q22）。改一条答复后，要回头检查受影响的条目。
+
+# M1 计划执行第 1–2 步
+
+## After ! uv run mooapp doctor
+
+几个值得记进 learnings 的点：
+
+- OpenD 版本显示为 1012：server_ver 返回的是这个数字，不是 9.x.xxxx 那种格式（vendor 示例里是 '504'）。
+- 账户与资金：实盘账户有 US 和 CA 两个市场的权限。模拟账户资金 currency=N/A，购买力是现金的 2 倍，和阶段 0 的结论一致。
+- 市场状态 OVERNIGHT：现在是美东 23:48，处于夜盘时段。快照更新时间停在收盘的 16:00:00，所以现在判断不了 P2（行情是实时还是延时）。
+- SDK 日志打到控制台：开头那 4 行是 SDK 自己的日志，有点吵。要不要关、怎么关，我先查 vendor 文档有没有设置日志级别的接口，有出处再改；这不影响验收。
+
+关于探针 scripts/probe_m1.py，建议常规时段再跑（美东 9:30–16:00）：
+
+- 现在是夜盘，按 vendor § Place Orders，模拟盘美股不支持夜盘。下单很可能被拒，这样就分不清 P1 的失败是「需要解锁」还是「时段不对」。
+- P2 也要在开盘时比较 update_time 和本机时间才有意义。
+
+现在跑也行，结果会如实记录，开盘后再跑一次补上。
+
+
+
+# M1 连通与配置（2026-11-12）
+
+### 验收结果
+
+| 验收 | 结果 | 依据 |
+| --- | --- | --- |
+| 1 `mooapp doctor` 输出五项，账号已脱敏 | 通过 | 你用 `!` 运行，11 项全部 PASS；`pytest -m sim` 7 passed |
+| 2 移走 secrets 后给出清晰报错 | 通过 | 只有 secrets 一项 FAIL：「配置文件不存在：…」，其余照常，无堆栈 |
+| 3 关掉 OpenD 后几秒内提示无法连接 | 通过 | 5 秒后一行提示，1–5 项跳过，6–8 项照常 |
+| 4 learnings 里有 unlock 的实测结论 | 通过 | 见下方 P1 |
+| 5 在 Claude Code 里运行 REAL 启动命令被人锁拒绝 | 通过 | 第一道：PreToolUse 钩子拦下了含 REAL 环境参数的 Bash 命令（实际发生过一次）；第二道：`tests/unit/test_cli_real.py` 进程内非 TTY 调用被 `HumanLockError` 拒绝；你在自己的交互终端运行得到「人锁：REAL 在 M4 实现，M1 不支持 REAL，已退出」 |
+
+### 探针结论
+
+#### 模拟盘下单不需要解锁交易（P1）
+
+- **结论**：不解锁直接 `place_order(trd_env=SIMULATE, acc_id=…)`，两次都 `ret=0` 并返回 order_id（常规时段一次、夜盘一次）
+- **依据**：两者（文档说模拟盘不需要，实测一致）
+- **出处**：vendor § Unlock Trade、§ Place Orders；`scripts/probe_m1.py` @ 09f90ac + 未提交改动（随 M1 提交）
+- **记录**：`recordings/probes/probe_m1_20261112T153002Z.jsonl`，运行时间 2026-11-12T15:30:02Z；另 `probe_m1_20261112T052002Z.jsonl`（夜盘）；SDK 10.12.7208，OpenD 1012
+- **影响**：M2 `MoomooBroker`：SIMULATE 不调用解锁；`unlock()` 只用于 REAL（SPEC 5.3）
+
+#### 模拟盘美股快照是实时行情（P2）
+
+- **结论**：常规时段快照 `update_time`（美东时间，原文 `2026-11-12 10:30:02`）比本机 UTC 晚约 2.2 秒，为实时行情。夜盘时 `last_price` 和 `update_time` 停在常规时段收盘（16:00:00），夜盘价格在 `overnight_price` 等字段
+- **依据**：实测
+- **出处**：vendor § Get Market Snapshot（「美股为美东时间」）；`scripts/probe_m1.py` @ 同上
+- **记录**：`recordings/probes/probe_m1_20261112T153002Z.jsonl`（`p2.compare`，`lag_seconds = 2.218`）；对照 `…T052002Z.jsonl`（`lag_seconds = 30003`，夜盘）
+- **影响**：M6 规则引擎与 M4「限价偏离」用 `last_price` 时，只在常规时段有意义（与 ADR-0003 一致）；`[quote] stale_after_seconds` 的健康检查只应在常规时段告警
+
+#### sandbox 拦住了 OpenD 端口（P6）
+
+- **结论**：Claude Code 的 sandbox 内，标准库连 `127.0.0.1:11111` 报 `PermissionError errno 1`；你的终端里同一调用连上。sandbox 内 `import moomoo` 也会失败：SDK 一导入就要写 `~/.com.moomoo.OpenD/Log/py_*.log`
+- **依据**：实测
+- **出处**：ADR-0015 第 3 条；`scripts/probe_m1.py` @ 同上
+- **记录**：`recordings/probes/probe_m1_20261112T044304Z.jsonl`（sandbox 内）对比 `…T153002Z.jsonl`（你的终端）
+- **影响**：ADR-0015 第 3 条确认落实。`broker/opend.py` 只在 `connect()` 里 import SDK，单元测试才能在 sandbox 里使用 broker 的类型
+
+### 其他实测发现
+
+- **撤单返回成功 ≠ 已撤销**：`modify_order(CANCEL)` 返回 `ret=0` 后立即 `order_list_query`，状态仍是 `SUBMITTED`；你在 App 里确认两张单（838902、839557）最终都是已撤单。撤单是异步的。M2/M3：OMS 收到撤单受理后进入待撤销状态，等推送或轮询看到终态才算撤销（对应 `order-transitions.md`）；M2 的探针应轮询到终态再结束（vendor § Modify or Cancel Orders 未写明）
+- **夜盘时模拟盘照样接受常规时段的 DAY 限价单**：美东 00:20（`market_us` 为 `AFTER_HOURS_END`，`get_market_state` 为 `OVERNIGHT`）下单返回 `SUBMITTING`、`session=RTH`，订单排队等开盘。上面 2026-11-11 那节「下单很可能被拒」的推测与实测不符。影响：ADR-0003「只做常规时段」不能依赖券商拒单，M4 闸门的 `regular_hours_only` 必须自己判断
+- **同一时刻两个接口的时段字段不同**：`get_global_state` 的 `market_us` 为 `AFTER_HOURS_END`，`get_market_state(['US.SPY'])` 为 `OVERNIGHT`。时段判断以 `get_market_state` 为准（vendor § Get global market status 本身也建议按品种查）
+- **`server_ver` 是 `1012`**，不是 `9.x.xxxx` 格式（vendor 示例为 `'504'`）
+- **模拟账户类型**：`acc_type=MARGIN`、`sim_acc_type=STOCK_AND_OPTION`（vendor § Get the List of Trading Accounts：美股模拟账户就是保证金账户）。P5 的「现金还是融资」由此得到部分回答；`can_sell_qty` 部分仍待 M2
+- **OpenD 过夜保持登录**：从 00:20 到 10:30，OpenD 没有手动操作，cron 运行时 `trd_logined`、`qot_logined` 都是 true（期间 Mac 是否睡眠未确认）。vendor FAQ Q12：「记住密码」登录可能在断线后无法自动重连，手动输入密码登录则能自动处理
+- **SDK 交易连接没有异步选项**：`OpenSecTradeContext` 的构造函数没有 `is_async_connect`，同步构造失败时每 6 秒重试、永不返回（SDK 源码 `common/open_context_base.py`；vendor 未写明）。`connect()` 的做法：先等异步行情连接 READY（证明 OpenD 在线、握手成功），再在守护线程里限时构造交易连接。OpenD 关闭时行情连接停在 `WAIT_RECONNECT`，所以拒绝连接也要等满 5 秒才报错
+- **`set_all_thread_daemon(True)`** 触发 SDK 内部 `setDaemon()` 的 DeprecationWarning（Python 3.15），不影响功能
+- **SDK 日志打印到控制台**，每次连接、断开各一行；是否关闭待查 vendor 有无设置日志级别的接口
+- **cron 运行**：cron 的 PATH 不含 `/opt/homebrew/bin`，要写 uv 的绝对路径；`var/logs/` 要先手动建
+- **`Path.exists()` 会把 PermissionError 当成「不存在」**：在 sandbox 里，`~/.config/mooapp/secrets.toml` 被报告为「不存在」而不是「无权读取」。已改为直接读文件、按异常类型区分（`config/loader.py`）；修复后的 sandbox 表现未验证（Claude 不得访问该目录）
+- **sandbox 内运行 uv**：要设 `UV_CACHE_DIR=$TMPDIR/…`；安装依赖要按命令放行 `pypi.org`、`files.pythonhosted.org`
