@@ -8,10 +8,13 @@
   但模拟盘撮合规则文档未写明。
 - 同时录下一份「部分成交 + 撤单」的推送（M2 验收第 3 条；M3 回放用）。
 
-副作用（R6），标的 US.SPY（在 [risk.simulate] 白名单内）：
-1. 限价买 100 股，价格 = 当前卖一价（不加价）。**数量 100 的理由**：要观察部分成交，数量需大于卖一档
-   可能的成交量；100 是 [risk.simulate] 的单笔上限 max_order_qty，约 6 万模拟资金。不加价是为了让成交
-   取决于盘口，增加部分成交的机会。
+副作用（R6），标的 US.TD（在 [risk.simulate] 白名单内）：
+1. 限价买 1000 股，价格 = 当前卖一价（不加价）。
+   - 第一次运行（2026-11-13，提交 29aa4e5）用 US.SPY 100 股：卖一量 40 股时仍一次全部成交，没录到部分成交
+     （learnings「M2 券商适配层：探针结论」）。
+   - 这次按你 2026-11-13 的决定再试一次：换白名单里成交量最低的 US.TD，数量**临时**超过 [risk.simulate]
+     的 max_order_qty（100）。1000 股约合几万模拟资金；限额本身不改，也不经过闸门（探针不走产品代码）。
+   - 再录不到部分成交，就按「改验收口径」处理，不再重试。
 2. 每 0.5 秒查询一次，最多 60 秒；仍未到终态就撤掉剩余部分，再轮询到终态。
 3. 已成交多少，就市价卖出多少，恢复原持仓；卖单轮询到终态。
 remark 以 probe: 开头；finally 里撤销本次运行所有未到终态的订单并打印结果（R6、R7）。
@@ -40,8 +43,8 @@ from mooapp.config.loader import load_broker_cfg, load_settings
 
 REPO = Path(__file__).resolve().parents[1]
 PROBE = Path(__file__).stem
-SYMBOL = "US.SPY"
-BUY_QTY = 100
+SYMBOL = "US.TD"
+BUY_QTY = 1000  # 临时超过 [risk.simulate] max_order_qty，见 docstring
 FILL_WAIT = 60.0
 CONNECT_TIMEOUT = 5.0
 POLL_INTERVAL = 0.5
@@ -366,15 +369,15 @@ class Probe:
         last = Decimal(str(row["last_price"]))
         ask = float(Decimal(str(row["ask_price"])))  # 卖一价本身就在最小变动单位上
 
-        # 1. 限价买 100 股 @ 卖一价
-        buy = self.place("buy100", ask, BUY_QTY, "BUY", "NORMAL")
+        # 1. 限价买 BUY_QTY 股 @ 卖一价
+        buy = self.place("buy1000", ask, BUY_QTY, "BUY", "NORMAL")
         if buy is None:
             return 1
         # 2. 最多等 FILL_WAIT 秒；未到终态就撤掉剩余部分
-        r = self.poll_until_terminal(buy, "buy100.wait", timeout=FILL_WAIT, required=False)
+        r = self.poll_until_terminal(buy, "buy1000.wait", timeout=FILL_WAIT, required=False)
         if buy not in self.terminal:
-            self.cancel(buy, "buy100.rest")
-            r = self.poll_until_terminal(buy, "buy100.cancel")
+            self.cancel(buy, "buy1000.rest")
+            r = self.poll_until_terminal(buy, "buy1000.cancel")
         dealt = 0 if r is None else int(float(r["dealt_qty"]))
         self.rec.log(
             "p4.summary", {}, "info",

@@ -246,3 +246,62 @@ CLAUDE.md 的规定是：「文档不明确时写探针脚本在模拟盘实测�
 - **cron 运行**：cron 的 PATH 不含 `/opt/homebrew/bin`，要写 uv 的绝对路径；`var/logs/` 要先手动建
 - **`Path.exists()` 会把 PermissionError 当成「不存在」**：在 sandbox 里，`~/.config/mooapp/secrets.toml` 被报告为「不存在」而不是「无权读取」。已改为直接读文件、按异常类型区分（`config/loader.py`）；修复后的 sandbox 表现未验证（Claude 不得访问该目录）
 - **sandbox 内运行 uv**：要设 `UV_CACHE_DIR=$TMPDIR/…`；安装依赖要按命令放行 `pypi.org`、`files.pythonhosted.org`
+
+## M2 券商适配层：探针结论（2026-11-13）
+
+两次运行均在常规时段（`get_market_state` = `AFTERNOON`），你用 `!` 运行，OpenD 为可视化版、未解锁。SDK 10.12.7208，OpenD `1012`，探针提交 `29aa4e5`（无未提交改动）。
+
+- `recordings/probes/probe_m2_20261113T143130Z.jsonl`（14:31:30Z 起）
+- `recordings/probes/probe_m2_partial_fill_20261113T143243Z.jsonl`（14:32:43Z 起）
+
+App 里当天模拟账户的 5 张订单与录制一致（你 2026-11-13 核对）：撤单 1 张（683.61），成交 4 张（买 1 @759.67、卖 1 @759.79、买 100 @759.07、卖 100 @759.18）。
+
+#### 订单时间字段是美东时间（P3）
+
+- **结论**：`create_time`、`updated_time` 是 `America/New_York` 本地时间，格式 `yyyy-MM-dd HH:mm:ss`，精确到秒。按美东解释后与下单前的本机 UTC 相差 −0.70、−0.38、−0.18、+0.08、−0.45 秒（秒级截断）；按 UTC 解释则差 −18000 秒。订单推送和查询结果的格式相同
+- **依据**：实测
+- **出处**：vendor § Place Orders 返回字段表（只说期货参见 OpenD 配置，美股文档未写明）；`scripts/probe_m2.py`、`scripts/probe_m2_partial_fill.py` @ 29aa4e5
+- **记录**：上面两个文件的 `p3.compare.*` 行；运行时间 2026-11-13T14:31:31Z–14:33:18Z；SDK 10.12.7208，OpenD 1012
+- **影响**：`broker/convert.py` 按美东时间解析，再转成 UTC（ADR-0011）。冬令时期间测的；夏令时由 `zoneinfo` 处理，未实测
+
+#### 模拟盘查不到成交记录和费用（P4 部分、P7）
+
+- **结论**：`deal_list_query` 返回 `ret=-1`，原文 `Paper trading does not support deal data.`；`order_fee_query` 返回 `ret=-1`，原文 `Paper trading is not supported.`。与文档一致
+- **依据**：两者
+- **出处**：vendor § Get Today's Deals（只支持实盘）、§ Get Order Fee › Interface Limitations（不支持模拟账户）；`scripts/probe_m2.py` @ 29aa4e5
+- **记录**：`probe_m2_20261113T143130Z.jsonl` 的 `deal_list_query`、`order_fee_query` 行
+- **影响**：SPEC Q2「模拟盘定时轮询 deal_list_query」不可行。模拟盘成交只能从订单推送 / 查询的 `dealt_qty` 增量得到，id 用 `order_id:累计成交量` 合成（M2 计划第 5 点）。模拟盘的费用只能记 0 或标为缺失（M7 决定）
+
+#### 模拟盘不会部分成交，整单一次成交（P4）
+
+- **结论**：限价买 100 股 @ 卖一价 759.58（当时卖一量只有 40 股），28.4 秒后一条推送直接从 `SUBMITTED` 变成 `FILLED_ALL`，`dealt_qty` 由 0 变为 100，均价 759.07（低于限价）。中间没有出现 `FILLED_PART`。另外 3 张成交单也都是一次全部成交。模拟盘撮合看来不按盘口数量拆单
+- **依据**：实测（一次 100 股 + 三次 1 股；样本少，不能排除别的条件下会部分成交）
+- **出处**：vendor § Trading Definitions › Order Status 列出 `FILLED_PART`，模拟盘撮合规则文档未写明；`scripts/probe_m2_partial_fill.py` @ 29aa4e5
+- **记录**：`probe_m2_partial_fill_20261113T143243Z.jsonl` 的 `push.order`、`p4.summary` 行
+- **影响**：M2 验收第 3 条（录到部分成交）在模拟盘上做不到，待你决定（PROGRESS）。M3 的部分成交场景只能由 FakeBroker 构造
+
+#### 模拟盘当日买入可立即卖出（P5）
+
+- **结论**：买 1 股成交后立即查持仓，`qty=1`、`can_sell_qty=1`；随后市价卖出成功。模拟账户 `acc_type=MARGIN`、`sim_acc_type=STOCK_AND_OPTION`，资金 100 万、购买力 200 万。实盘账户 `acc_type=TFSA`
+- **依据**：实测
+- **出处**：vendor § Get Positions（`can_sell_qty` = 持仓 − 冻结）；`scripts/probe_m2.py` @ 29aa4e5
+- **记录**：`probe_m2_20261113T143130Z.jsonl` 的 `position_list_query.*`、`p5.can_sell`、`accinfo_query` 行
+- **影响**：闸门的「可卖数量」用 `can_sell_qty`（ADR-0002）。实盘是 TFSA，`can_sell_qty` 的表现可能和模拟盘的保证金账户不同，REAL 阶段再核对
+
+#### 撤单到终态约 0.05 秒，但撤单刚返回时的查询仍是旧状态
+
+- **结论**：`modify_order(CANCEL)` 返回 `ret=0` 后 5 毫秒查询仍是 `SUBMITTED`（与 M1 一致）；`CANCELLED_ALL` 推送在返回后 46 毫秒到达，0.53 秒时查询也已是终态
+- **依据**：实测
+- **出处**：vendor § Modify or Cancel Orders 未写明；`scripts/probe_m2.py` @ 29aa4e5
+- **记录**：`probe_m2_20261113T143130Z.jsonl` 订单 840514
+- **影响**：OMS 的待撤销状态以推送或查询看到终态为准（M3）；契约测试轮询到终态
+
+### 其他实测发现
+
+- **模拟盘可成交单也要等几秒到几十秒才成交**：限价买 1 股（限价高于卖一价）6.7 秒，市价卖 1 股 15.0 秒，限价买 100 股 28.4 秒，市价卖 100 股 5.7 秒。成交推送都在整秒后约 0.1 秒到达。契约测试等待成交的超时至少 60 秒
+- **成交价可能优于限价**：限价 761.07 成交 759.67，限价 759.58 成交 759.07
+- **市价单回报里 `price` 为 0.0**；`dealt_avg_price` 可有 3 位小数（759.179）
+- **模拟账户的 `average_cost` 有值**（759.67），与 vendor § Get Positions「对证券模拟账户无效」不符。`Position.avg_cost` 仍定为 `Decimal | None`，有值就解析
+- **持仓清零后行仍在**：卖出后 `position_list_query` 仍返回 SPY 一行，`qty=0`。转换时要过滤 `qty == 0`
+- **推送顺序**：每张单依次推送 `SUBMITTING` → `SUBMITTED` → 终态。`SUBMITTING` 推送比 `place_order` 返回早约 3 毫秒，印证 vendor § Place Orders 的提示（推送可能先于返回）
+- **快照有 `ask_vol`、`bid_vol`**：快照的 `update_time` 也是美东时间
