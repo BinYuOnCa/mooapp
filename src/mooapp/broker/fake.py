@@ -7,6 +7,13 @@
 - 成交与 MoomooBroker 一样经 FillSynthesizer 合成（synthetic=True）
 - strict_limits=True：按 vendor 限频（不加余量）检查写调用，超频抛 RateLimited，用来验证限流器
 - 回调在锁外调用，避免回调里再调 broker 时死锁
+
+M3 新增（测试辅助）：
+- fail_next_place(exc, accepted, times)：下一次（或几次）place_order 抛 exc；accepted=True 表示券商其实已收单
+  （模拟「返回丢了」），accepted=False 表示根本没到券商
+- replay(rows)：把录制的推送行（PushRecorder 格式里的 row）经 order_from_row 推给回调，同时更新券商端状态
+- seed_order / seed_fill：预置券商端订单或成交，不推送
+- REAL 环境的 fill() 生成非合成的成交 id（D1、D2…），模拟实盘成交推送带 deal_id（vendor § Deals Push Callback）
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from mooapp.broker.convert import FillSynthesizer
+from mooapp.broker.convert import FillSynthesizer, order_from_row
 from mooapp.broker.port import (
     BrokerError,
     BrokerFill,
@@ -91,6 +98,31 @@ class FakeBroker:
         self._synth = FillSynthesizer()
         self._order_cbs: list[Callable[[BrokerOrder], None]] = []
         self._fill_cbs: list[Callable[[BrokerFill], None]] = []
+        self._place_failures: deque[tuple[BrokerError, bool]] = deque()
+        self._next_deal = 1
+
+    # ------------------------------------------------------------------ 测试辅助（M3）
+
+    def fail_next_place(self, exc: BrokerError, accepted: bool, times: int = 1) -> None:
+        with self._lock:
+            for _ in range(times):
+                self._place_failures.append((exc, accepted))
+
+    def replay(self, rows: list[dict[str, Any]]) -> None:
+        """回放录制的推送行：逐行转换、更新券商端状态并推送。"""
+        for row in rows:
+            o = order_from_row(row)
+            with self._lock:
+                self._orders[o.broker_order_id] = o
+            self._dispatch([o], [])
+
+    def seed_order(self, order: BrokerOrder) -> None:
+        with self._lock:
+            self._orders[order.broker_order_id] = order
+
+    def seed_fill(self, fill: BrokerFill) -> None:
+        with self._lock:
+            self._fills.append(fill)
 
     # ------------------------------------------------------------------ 测试辅助
 
@@ -147,9 +179,23 @@ class FakeBroker:
                 broker_order_id, dealt_qty=cum, dealt_avg_price=avg, raw_status="FILLED_ALL" if cum == o.qty else "FILLED_PART"
             )
             self._apply_fill(o.symbol, o.side, qty, price)
-            f = self._synth.observe(updated)
-            if f is None:
-                raise BrokerError(f"内部错误：订单 {broker_order_id} 成交后没有生成成交记录")
+            if self.env is Env.REAL:
+                f = BrokerFill(
+                    fill_id=f"D{self._next_deal}",
+                    broker_order_id=broker_order_id,
+                    client_order_id=o.client_order_id,
+                    symbol=o.symbol,
+                    side=o.side,
+                    qty=qty,
+                    price=price,
+                    ts=updated.updated_at,
+                    synthetic=False,
+                )
+                self._next_deal += 1
+            else:
+                f = self._synth.observe(updated)
+                if f is None:
+                    raise BrokerError(f"内部错误：订单 {broker_order_id} 成交后没有生成成交记录")
             self._fills.append(f)
         self._dispatch([updated], [f])
         return f
@@ -199,6 +245,9 @@ class FakeBroker:
         with self._lock:
             self._record("place_order", req)
             self._check_real_unlocked()
+            failure = self._place_failures.popleft() if self._place_failures else None
+            if failure is not None and not failure[1]:
+                raise failure[0]  # 没到券商
             if req.side is Side.SELL:
                 held = self._positions.get(req.symbol, _Pos(0, Decimal(0))).qty
                 if req.qty > held:
@@ -225,6 +274,8 @@ class FakeBroker:
             self._orders[oid] = o
             self._pending.append(("ack", oid))
         self._dispatch([o], [])
+        if failure is not None:
+            raise failure[0]  # 券商已收单，但返回丢了
         return o
 
     def cancel_order(self, broker_order_id: str) -> None:
@@ -240,9 +291,9 @@ class FakeBroker:
 
     # ------------------------------------------------------------------ 读
 
-    def query_orders(self, open_only: bool = True) -> list[BrokerOrder]:
+    def query_orders(self, open_only: bool = True, refresh: bool = False) -> list[BrokerOrder]:
         with self._lock:
-            self._record("query_orders", open_only)
+            self._record("query_orders", open_only, refresh)
             orders = list(self._orders.values())
         return [o for o in orders if not o.is_terminal] if open_only else orders
 

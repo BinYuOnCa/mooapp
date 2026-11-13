@@ -164,11 +164,12 @@ class MoomooBroker:
 
     # ------------------------------------------------------------------ 读
 
-    def query_orders(self, open_only: bool = True) -> list[BrokerOrder]:
-        # vendor § Get open Orders：当日订单
+    def query_orders(self, open_only: bool = True, refresh: bool = False) -> list[BrokerOrder]:
+        # vendor § Get open Orders：全部未完成订单 + 24 小时内成交或撤销的订单；
+        # refresh_cache=True 直接向服务器请求、不用 OpenD 缓存（受 30 秒 10 次限频，ThrottledBroker 负责）
         rows = self._rows(
             "order_list_query",
-            self._trade.order_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=False),
+            self._trade.order_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=refresh),
         )
         orders = [order_from_row(r) for r in rows]
         return [o for o in orders if not o.is_terminal] if open_only else orders

@@ -328,3 +328,47 @@ App 里当天模拟账户的 5 张订单与录制一致（你 2026-11-13 核对�
 - **出处**：`src/mooapp/broker/`（M2 实现，未提交）
 - **记录**：`recordings/pushes/SIMULATE_20261113T184058Z.jsonl`（契约测试；验收测试未开录制）；SDK 10.12.7208，OpenD 1012
 - **影响**：M2 验收 1、2 在模拟盘通过；验收 3 按改后的口径（整单成交 + 撤单）已有录制，部分成交由 FakeBroker 覆盖。这份录制是 M3 回放的输入
+
+## M3 OMS 核心：设计与实现中的发现（2026-11-13）
+
+探针 P9（DAY 单收盘过期、DELETED）还没跑，结论待补；在那之前 DISABLED、DELETED 按「映射不了」报警（docs/status-mapping.md）。
+
+#### Moomoo 订单状态共 11 个，不是 12 个
+
+- **结论**：vendor § Trading Definitions › Order Status 列出 `NONE` 加 10 个（WAITING_SUBMIT … DELETED），共 11 个。SPEC 6 节「11 个（WAITING_SUBMIT … DELETED）」的写法容易数错，M3 计划里我也写成了 12 个，已在 status-mapping.md 和测试里改正
+- **依据**：文档（`tests/unit/test_status_mapping.py` 直接从 vendor 文档解析，防止再数错）
+- **出处**：vendor § Order Status（第 26023–26069 行）
+- **影响**：`oms/mapping.py` 的 `VENDOR_STATUSES`
+
+#### 快照是状态，不是事件：映射要看本地状态
+
+- **结论**：Moomoo 只给订单快照（状态 + 累计成交量），状态机要事件。同一个快照，本地状态不同，产生的事件也不同：
+  - 本地 PENDING_NEW 或 UNKNOWN 时直接看到 `CANCELLED_*`（推送丢了、轮询看到终态）：矩阵里没有 PENDING_NEW 加撤销的转换，要先补一个 ACK
+  - 本地已 CANCELED 再收到撤销快照：重复快照，不能再发事件，否则被判为非法回报、误报警
+  - 内容没变的快照（每 5 秒一次的轮询）直接跳过，不写事件，否则 order_events 会被轮询刷满
+- **依据**：设计推演，并由 `tests/unit/test_replay.py` 验证（M2 录制的 69 条推送随机丢 40% 再轮询）
+- **影响**：`oms/mapping.py`、`oms/oms.py`
+
+#### broker 层的 FillSynthesizer 重启后会造成超额成交
+
+- **结论**：`FillSynthesizer` 把已见的累计量记在内存里。重启后从 0 算起：重启前已成交 40 股，重启后收到累计 100 股的推送，会合成一条 100 股的成交。OMS 改为按本地 `cum_qty` 自己算增量，broker 层的合成成交不进 OMS（模拟盘）。成交 id `order_id:累计量` 是确定的，跨重启也能按 fill_id 去重
+- **依据**：读代码 + `test_oms_ingest.py::test_restart_after_partial_does_not_overfill`
+- **影响**：`oms/mapping.py synthesized_fill`、`EventPump.attach`
+
+#### 超时重发与「绝不重发」的冲突（T55）
+
+- **结论**：mini-OMS 的 UNKNOWN 态「只能等回报或对账，绝不重发」，而 M3 要求「确认不存在才重发」。你决定加 T55：用 `refresh_cache=True` 查询，等宽限期后连续 2 次都查不到这个 remark 才用同一 client_order_id 重发，最多发 3 次；用完次数判为 REJECTED 并报警
+- **依据**：你 2026-11-13 的决定；`tests/unit/test_executor_idempotency.py`
+- **出处**：vendor § Get open Orders（refresh_cache；限频 30 秒 10 次）；docs/order-transitions.md T55
+- **影响**：`oms/state.py`、`oms/executor.py`；查不到是否等于不存在仍依赖宽限期（默认 3 秒 × 2），模拟盘验收 4 会实测
+
+#### 管理员策略会盖住项目里的 sandbox socket 放行
+
+- **结论**：项目 `.claude/settings.json` 放行了 `/tmp/.s.PGSQL.5432`，但 sandbox 内连接仍报 `Operation not permitted`（`/tmp` 和 `/private/tmp` 两种写法都不行）。当时管理员策略 `managed-settings.json` 的 `sandbox.network` 只有 `allowedDomains`，没有 `allowUnixSockets`。你在管理员策略里加上 socket 放行后立即生效，`pytest -m pg` 25 passed
+- **依据**：实测（2026-11-13）
+- **影响**：以后改 sandbox 网络设置，要看管理员策略，不能只看项目配置
+
+#### 同步测试模式下「本地动作排在已到推送之后」
+
+- **结论**：EventPump 的 `call()` 先处理已入队的推送，再执行本地动作，和线程模式下的先进先出一致。因此要测「券商拒绝撤单」，必须让推送真的丢失（attach=False），否则成交推送会先到，撤单前订单已是 FILLED。这符合真实情况：OMS 能看到的，就是已到达的回报
+- **影响**：`tests/unit/test_executor_idempotency.py::test_cancel_rejected_by_broker_goes_back_and_raises`（第 3 步修改）
