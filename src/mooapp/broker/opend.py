@@ -2,7 +2,7 @@
 
 - 全项目只有 broker/ 与 scripts/ import moomoo（SPEC 3.3 规则 1）。SDK 类型不出本模块：
   返回值都是下面的数据类。
-- moomoo 只在 connect() 里 import：SDK 一导入就写 ~/.com.moomoo.OpenD/Log/，在 Claude Code 的
+- moomoo 只在 open_contexts() 里 import（M2 的 moomoo.open_broker 也用它）：SDK 一导入就写 ~/.com.moomoo.OpenD/Log/，在 Claude Code 的
   sandbox 里会抛 PermissionError（2026-11-11 实测）。延迟导入让单元测试能使用本模块的类型。
 - SDK 的 ret != RET_OK 一律转成 BrokerError，不吞（SPEC 2.3）。
 - M1 不下单、不解锁；funds() 只接受 SIMULATE（REAL 在 M4，经人锁）。
@@ -11,28 +11,20 @@
 from __future__ import annotations
 
 import importlib.metadata
+import socket
 import threading
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
-from mooapp.common import Env, MooappError
+from mooapp.broker.port import BrokerError, BrokerUnavailable  # M2 起定义在 port；doctor 仍从这里导入
+from mooapp.common import Env
 from mooapp.config.models import BrokerCfg
 
 SDK_DIST = "moomoo-api"
 _POLL_INTERVAL = 0.1
-
-
-# ------------------------------------------------------------------ 异常（SPEC 5.3）
-
-
-class BrokerError(MooappError):
-    """SDK 返回 ret != RET_OK，或返回值无法解析。"""
-
-
-class BrokerUnavailable(BrokerError):
-    """OpenD 不可达 / 未在限定时间内就绪。"""
+_TCP_PRECHECK_TIMEOUT = 1.0
 
 
 # ------------------------------------------------------------------ 数据类
@@ -174,17 +166,31 @@ class MoomooReadSession:
                 ctx.close()
 
 
-def connect(cfg: BrokerCfg, timeout: float = 5.0) -> MoomooReadSession:
-    """限时连接 OpenD；timeout 秒内未就绪抛 BrokerUnavailable。
+def _tcp_precheck(cfg: BrokerCfg, timeout: float) -> None:
+    """端口不通时快速失败，不加载 SDK（M1 已知问题：SDK 导入即写日志目录，且同步构造会无限重试）。"""
+    try:
+        sock = socket.create_connection((cfg.host, cfg.port), timeout=min(timeout, _TCP_PRECHECK_TIMEOUT))
+    except ConnectionRefusedError as e:
+        raise BrokerUnavailable(f"OpenD {cfg.host}:{cfg.port} 拒绝连接（OpenD 未启动？）") from e
+    except OSError as e:
+        raise BrokerUnavailable(f"无法连接 OpenD {cfg.host}:{cfg.port}：{e}") from e
+    sock.close()
+
+
+def open_contexts(cfg: BrokerCfg, timeout: float = 5.0) -> tuple[Any, Any, Any]:
+    """限时打开行情连接和美股交易连接，返回 (moomoo 模块, quote_ctx, trade_ctx)；
+    timeout 秒内未就绪抛 BrokerUnavailable。connect() 与 moomoo.open_broker() 共用。
 
     SDK 的同步构造在连接失败时每 6 秒重试、永不返回（learnings「阶段 0 实测」第 3 条；
     SDK 源码 common/open_context_base.py）。因此：
+    0. 先做 TCP 预检，端口拒绝时 1 秒内失败，不 import SDK。
     1. 行情连接用 is_async_connect=True，轮询 status 直到 READY 或超时。
        （这两个参数 vendor 未写明，用法来自阶段 0 实测与 SDK 源码。）
     2. 交易连接没有异步选项；行情连接就绪说明 OpenD 在线且握手成功，此时再在守护线程里
        同步构造交易连接，用剩余时间限时等待。
     """
     deadline = time.monotonic() + timeout
+    _tcp_precheck(cfg, timeout)
     try:
         import moomoo as ft
     except PermissionError as e:
@@ -192,6 +198,8 @@ def connect(cfg: BrokerCfg, timeout: float = 5.0) -> MoomooReadSession:
 
     # vendor § Basic Functions › Set Thread Mode：SDK 线程设为守护线程，超时放弃时进程仍能退出
     ft.SysConfig.set_all_thread_daemon(True)
+    # vendor § Enable console logging of OpenD connection status：不往终端打印连接日志（learnings M2：实测有效）
+    ft.SysConfig.enable_console_log(False)
 
     quote = ft.OpenQuoteContext(host=cfg.host, port=cfg.port, is_async_connect=True)
     while quote.status != ft.ContextStatus.READY:
@@ -232,4 +240,10 @@ def connect(cfg: BrokerCfg, timeout: float = 5.0) -> MoomooReadSession:
         if error is not None:
             raise BrokerUnavailable(f"交易连接失败：{error!r}") from error
         raise BrokerUnavailable(f"交易连接 {timeout:g} 秒内未就绪")
+    return ft, quote, trade
+
+
+def connect(cfg: BrokerCfg, timeout: float = 5.0) -> MoomooReadSession:
+    """M1 只读会话；timeout 秒内未就绪抛 BrokerUnavailable。"""
+    ft, quote, trade = open_contexts(cfg, timeout)
     return MoomooReadSession(ft, quote, trade)

@@ -1,7 +1,7 @@
 # PROGRESS
 
-**当前**：M1 完成（2026-11-12）：验收 5 条全部通过；`pytest` 68 passed、`pytest -m pg` 3 passed、`pytest -m sim` 7 passed；结论已写入 learnings「M1 连通与配置」。等你审 diff、提交、`git tag m1`
-**下一步**：新会话中给出 M2（券商适配层与 FakeBroker）计划，你确认后再写代码
+**当前**：M2 第 4 步完成（2026-11-13）：实现完成，`pytest` 180 passed（含 FakeBroker 部分成交 2 项，覆盖验收第 3 条后半句）；你在常规时段跑的模拟盘契约测试 7 passed、验收测试 1 passed，推送录在 `recordings/pushes/SIMULATE_20261113T184058Z.jsonl`
+**下一步**：你审 M2 diff、提交、`git tag m2`；SPEC 8 节验收第 3 条改口径（你手工改）。之后进入 M3 计划
 
 ## 已完成
 
@@ -31,6 +31,43 @@
     - 新增 `tests/conftest.py`（假配置 fixture）
     - `ConfigUnreadable`：区分「不存在」和「无权读取」
     - 探针还读了 `settings.toml` 的白名单（R6），仍通过 `mooapp.config`
+
+## M2 计划（已确认 2026-11-12）
+
+目标：SPEC 8 节 M2 三条验收。不做 REAL、OMS、闸门；MoomooBroker 遇到 `Env.REAL` 直接拒绝（REAL 在 M4）。
+
+### vendor 发现（改动原设计）
+
+- `deal_list_query` 只支持实盘（§ Get Today's Deals）：模拟盘成交只靠 `dealt_qty` 增量，id 合成为 `order_id:累计成交量`
+- `order_fee_query` 不支持模拟账户（§ Get Order Fee）：P7 由文档回答，探针只记报错原文
+- `SysConfig.enable_console_log(False)`（§ Enable console logging）：关掉 SDK 控制台日志
+- 模拟账户 `average_cost` 无效（§ Get Positions）：`Position.avg_cost` 为 `Decimal | None`
+
+### 你确认的点
+
+1. 模拟盘契约测试在 M2 直接调用 `BrokerPort.place_order`（尚无闸门；只 SIMULATE，只由你用 `-m sim` 跑）
+2. 验收 2：`US.SPY` 限价 = 最新价 × 0.9、1 股、连下 20 笔后全部撤销；限流 15 次/30 秒，窗口加 1 秒余量。**验收测试走做法 C**：Claude 在聊天里贴草稿，你复制到 `tests/acceptance/` 审核、修改；以后对该目录的修改也只由你手工进行
+3. 验收 3：`US.SPY` 100 股限价 = 卖一价，60 秒未到终态就撤剩余，已成交部分市价卖回；录不到部分成交就停下问你
+4. remark 格式 `moo:<32 位 uuid4 hex>`；不以 `moo:` 开头的（含 `probe:`）都是外部订单
+5. 模拟盘的合成成交在 broker 层生成，经 `on_fill` 送出
+6. `OrderRequest` 构造时校验（价格必须在最小变动单位上，不自动取整）
+7. `subscribe_quotes` 的 Moomoo 实现推到 M6；重连只依赖 SDK 自带重连，完整验收在 M9
+8. `BrokerOrder.kind` 为 `OrderKind | None`（None = 非 v1 类型的外部订单）
+
+### 文件
+
+- 新增：`src/mooapp/clock.py`；`src/mooapp/broker/` 下 `port.py`、`convert.py`、`throttle.py`、`moomoo.py`、`recorder.py`、`fake.py`；`scripts/probe_m2.py`、`scripts/probe_m2_partial_fill.py`
+- 修改：`common.py`（Side、OrderKind、Source）、`broker/opend.py`（异常改从 port 导入、关控制台日志、TCP 预检快速失败）、`ops/doctor.py`（仅导入路径）；收尾改 learnings、PROGRESS
+- 测试：`tests/unit/` 下 `test_order_request.py`、`test_convert.py`、`test_throttle.py`、`test_moomoo_broker.py`，`test_layering.py` 加一条；`tests/contract/test_broker_contract.py`（Fake 默认，sim 由你跑）
+- 不改：风控限额、`tests/acceptance/`、`.claude/`、`config/*.toml`；无新依赖
+
+### 执行顺序
+
+1. 探针（常规时段，你用 `!` 跑）→ learnings
+2. 写测试，确认失败，原样贴结果；**停下等你确认**；同时贴验收测试草稿（做法 C）
+3. 写实现直到 `pytest` 通过
+4. 你用 `!` 跑 `pytest -m sim` 和你的验收测试；推送录在 `recordings/pushes/`
+5. learnings、PROGRESS；你审 diff、提交、`git tag m2`
 
 ## M1 计划（已确认 2026-11-11，已完成 2026-11-12；保留作记录）
 
@@ -103,6 +140,10 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 
 ## 待你处理
 
+- [ ] SPEC 8 节 M2 验收第 3 条改口径（你手工改）：模拟盘只录「整单成交 + 撤单」，部分成交由 FakeBroker 注入的推送覆盖（learnings「M2 › 模拟盘不会部分成交」）
+- [x] 提交 `docs/learnings.md`、`PROGRESS.md` 中第二次部分成交探针的结论（ef26879）
+- [ ] 审 M2 实现 diff（`src/mooapp/clock.py`、`common.py`、`broker/` 下 7 个文件）、learnings、PROGRESS，提交，`git tag m2`
+
 - [x] 核对 `config/settings.toml`：`[risk.real]` 白名单 ETF 与现价、`max_limit_deviation_pct`、`[risk.simulate]` 数值、邮件收件人
 - [x] 在 secrets 里填 `[accounts] real_acc_id`（2026-11-12 doctor 显示「real_acc_id 已填」）
 - [x] `config/settings.toml`（你在 M1 期间改过，Claude 未动）：两个白名单里的 `US.TLSA` 疑为 `US.TSLA` 的笔误；`[risk.real]` 白名单 7 只，其中 SPY、QQQ、NVDA、AMZN 单价远超 `max_order_value = 100`，与注释「1–2 只低价 ETF」不一致
@@ -119,9 +160,11 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 - PATH 上的 `psql` / `pg_isready` 是 14.12 客户端（来自 `postgresql@14`），服务端是 17；工具要用 `/opt/homebrew/opt/postgresql@17/bin/` 下的版本
 - Claude 连不上 OpenD：`mooapp doctor`、`pytest -m sim`、探针、模拟盘验收都由你用 `!` 运行；sandbox 内 `import moomoo` 也会失败
 - 撤单是异步的：`modify_order(CANCEL)` 返回成功后立即查询仍是 `SUBMITTED`。M2 探针要轮询到终态；M3 OMS 按待撤销状态处理
-- OpenD 拒绝连接时 SDK 进入 `WAIT_RECONNECT` 而不报错，doctor 要等满 5 秒才提示
+- ~~OpenD 拒绝连接时 SDK 进入 `WAIT_RECONNECT` 而不报错，doctor 要等满 5 秒才提示~~：M2 已加 TCP 预检，端口拒绝时 1 秒内报错且不加载 SDK
+- 订单方向为 `SELL_SHORT` / `BUY_BACK` 的外部订单会让 `query_orders` 报 BrokerError（v1 只有 BUY / SELL；是否映射属于业务决策，ADR 未覆盖，遇到再议）
+- SDK 会接住推送回调里的异常、只写进 SDK 日志：`MoomooBroker` 先用 logging 记 ERROR 再抛出（learnings「M2 实现」）；常驻进程要配置 logging 落盘（M9）
 - sandbox 内 doctor 的 secrets 项：改为区分「无权读取」后未在 sandbox 内复验（Claude 不得访问 `~/.config/mooapp/`）
-- SDK 日志打印到控制台；`set_all_thread_daemon(True)` 触发 SDK 内部的 DeprecationWarning（Python 3.15）
+- ~~SDK 日志打印到控制台~~（M2 已用 `enable_console_log(False)` 关掉）；`set_all_thread_daemon(True)` 触发 SDK 内部的 DeprecationWarning（Python 3.15）
 
 ## M1 前置条件（全部满足）
 

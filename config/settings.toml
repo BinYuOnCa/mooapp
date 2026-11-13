@@ -21,7 +21,7 @@ regular_hours_only = true        # 只允许常规交易时段（ADR-0003）
 # 实盘微仓：手册第 7 节示例值，"全亏光也只当学费"
 # 白名单：1–2 只单价较低、流动性好的 ETF；上线前核对现价低于 max_order_value
 whitelist = ["US.SCHD",'US.SPY','US.TSLA','US.TD','US.NVDA','US.AMZN','US.QQQ']
-max_order_qty = 1
+max_order_qty = 5
 max_order_value = 600.0
 max_position_qty = 5
 max_daily_orders = 10
