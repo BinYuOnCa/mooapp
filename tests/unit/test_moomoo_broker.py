@@ -273,6 +273,15 @@ def test_query_orders_open_only(broker):
     assert [o.broker_order_id for o in broker.query_orders(open_only=False)] == ["840514", "840515"]
 
 
+def test_query_orders_refresh_passes_refresh_cache(broker, ctxs):
+    """M3：Resolver 和启动恢复要绕过 OpenD 缓存确认订单是否存在（vendor § Get open Orders › refresh_cache）。"""
+    trade = ctxs[0]
+    broker.query_orders(open_only=False, refresh=True)
+    broker.query_orders(open_only=False)
+    kws = [kw for name, kw in trade.calls if name == "order_list_query"]
+    assert [kw["refresh_cache"] for kw in kws[-2:]] == [True, False]
+
+
 def test_query_positions_drops_zero_qty(broker):
     ps = broker.query_positions()
     assert [(p.symbol, p.qty) for p in ps] == [("US.SPY", 1)]

@@ -179,3 +179,31 @@ def test_throttled_broker_passes_reads_through_unthrottled():
         b.query_positions()
     assert c.monotonic() == before
     assert b.env is Env.SIMULATE
+
+
+# ------------------------------------------------------------------ M3：order_list_query(refresh_cache=True)
+
+
+def test_refresh_query_rule_matches_vendor():
+    """vendor § Get open Orders › Interface Limitations：每个 acc_id 30 秒 10 次。缓存查询（refresh=False）仍不限流。"""
+    from mooapp.broker.throttle import QUERY_REFRESH_RULE
+
+    assert (QUERY_REFRESH_RULE.max_calls, QUERY_REFRESH_RULE.window, QUERY_REFRESH_RULE.margin) == (10, 30.0, 1.0)
+
+
+def test_throttled_broker_throttles_only_refresh_queries():
+    c = FakeClock(T0)
+    fb = FakeBroker(env=Env.SIMULATE, clock=c)
+    b = ThrottledBroker(fb, c)
+    start = c.monotonic()
+    for _ in range(10):
+        b.query_orders(open_only=False, refresh=True)
+    assert c.monotonic() - start < 1.0
+    b.query_orders(open_only=False, refresh=True)  # 第 11 次等窗口
+    assert c.monotonic() - start >= 31.0 - 1e-9
+    mid = c.monotonic()
+    for _ in range(20):
+        b.query_orders(open_only=False)
+    assert c.monotonic() == mid
+    assert fb.calls("query_orders")[-1] == (False, False)
+    assert fb.calls("query_orders")[0] == (False, True)

@@ -57,11 +57,11 @@ def write_calls(p: Path) -> list[str]:
 
 
 def test_write_calls_only_in_broker():
-    """SPEC 5.4 防绕过（M2 先管住 src/）：券商写方法只在 broker/ 里调用。
-    M3 加 oms/executor.py 后放行它；M4 再加 GateTicket 检查。tests/contract 在 M2 直接调用（你确认的第 1 点），不在扫描范围。"""
+    """SPEC 5.4 防绕过：券商写方法只在 broker/ 与 oms/executor.py 里调用（M3 放行 executor；
+    GateTicket 检查见 tests/unit/test_write_path.py）。tests/contract 在 M2 直接调用（你确认的第 1 点），不在扫描范围。"""
     bad = []
     for p in SRC.rglob("*.py"):
-        if p.is_relative_to(BROKER):
+        if p.is_relative_to(BROKER) or p == SRC / "oms" / "executor.py":
             continue
         bad += [f"{p.relative_to(REPO)}:{c}" for c in write_calls(p)]
     assert not bad, f"券商写方法只能在 broker/ 中调用：{bad}"

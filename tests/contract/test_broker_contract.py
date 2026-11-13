@@ -289,6 +289,19 @@ def test_deals_and_fees_not_supported_on_simulate(h: Harness):
         h.broker.query_fees(["0"])
 
 
+def test_refresh_query_finds_order_by_remark(h: Harness):
+    """M3 Resolver 依赖：order_list_query(refresh_cache=True) 能按 remark 找到刚下的单（vendor § Get open Orders）。
+    模拟盘副作用：US.SPY 限价买 1 股 @ 最新价 × 0.9，随后撤销。"""
+    o = h.broker.place_order(far_buy(h))
+    try:
+        found = [x for x in h.broker.query_orders(open_only=False, refresh=True) if x.remark == o.remark]
+        assert [x.broker_order_id for x in found] == [o.broker_order_id]
+        assert found[0].client_order_id == o.client_order_id
+    finally:
+        h.broker.cancel_order(o.broker_order_id)
+        h.wait_status(o.broker_order_id, {"CANCELLED_ALL"}, CANCEL_TIMEOUT)
+
+
 def test_positions_have_no_zero_rows(h: Harness):
     assert all(p.qty > 0 for p in h.broker.query_positions())
 
