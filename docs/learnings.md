@@ -505,3 +505,9 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
 
 - **结论**：能连数据库的任何进程都能往 commands 表插一行 resume，绕过交互终端确认。按 ADR-0029 加 HMAC-SHA256 签名，密钥在 secrets 的 `[resume] key`
 - **影响**：`ops/resume_auth.py`、`ops/commands.py`、`ops/cli.py`、`config/models.py`
+
+#### 规则命令也要过期：「迟到的撤销」不一定减少风险（ADR-0030）
+
+- **结论**：halt 迟到也该执行，因为它只减少风险。`rule_cancel` 不同：入场单已成交时，取消规则会拿掉止损保护，迟到执行会在你不知情时让持仓失去保护。所以 `rule_add`、`rule_cancel` 和 `place`、`cancel` 一样，命令行超时即过期。规则 id 不能复用、同一标的只能有一条活动规则（ADR-0020），本来就防住了「重复添加」，过期解决的是「迟到」
+- **依据**：你 2026-11-14 的决定；`tests/unit/test_commands.py::test_rule_add_expires_when_cli_gave_up`、`test_rule_cancel_expires_when_cli_gave_up`（修复前失败）
+- **影响**：`ops/commands.py`
