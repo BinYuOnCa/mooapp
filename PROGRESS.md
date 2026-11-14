@@ -174,6 +174,9 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 - [ ] M3：跑探针 P9：`! uv run python scripts/probe_m3_expiry.py`（美东 15:45–16:00），次日 `--check <order_id>`；App 里删一张远离市价的单后再 `--check`
 - [ ] M3：`! uv run mooapp db migrate`；常规时段 `! uv run pytest -m sim` 与 `! uv run pytest -m sim tests/acceptance/test_m3_idempotent_retry.py tests/acceptance/test_m3_restart_recovery.py`
 - [x] M3：审 diff 与两份 fixture，提交（aff9fee、600d29e）
+- [ ] M3（周一常规时段）：两份 M3 验收与 sim 契约测试**分开跑**，中间等满 31 秒，因为限频按账户算、多个 broker 共用额度（learnings「M3 › vendor 限频按账户计算」）。建议先给验收的 `finally` 加上撤单失败的处理
+- [ ] M3（周一美东 16:00 后，周二再一次）：`! uv run python scripts/probe_m3_expiry.py --check 841874 841875 841876 841877 841878 841879 841880 841881 841882 841883`，看 DAY 单过期后的状态 → 定 DISABLED 映射
+- [ ] 决定：sim 测试里同一进程的多个 broker 是否共用限流器（进程级、按 acc_id）
 - [ ] M3：验收通过后 `/milestone-git finish 3`（tag `accept/milestone_3`）
 - [ ] 提交 `.claude/skills/milestone-git/`（你本人提交：`.claude/` 由你维护）
 
