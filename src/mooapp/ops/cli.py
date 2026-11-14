@@ -203,7 +203,15 @@ def _submit(ctx: typer.Context, kind: str, payload: dict, actor: str = "cli") ->
         store.close()
 
 
+def _exit_if_expired(r: dict) -> None:  # type: ignore[type-arg]
+    """常驻进程取出命令时已过了命令行的截止时间（M4 审查 #7、ADR-0030）：没有执行，不是闸门拒绝。"""
+    if r.get("rule") == "expired":
+        typer.echo(f"命令已过期，未执行：{r.get('reason')}。请查询后再决定是否重发", err=True)
+        raise typer.Exit(EXIT_COMMAND)
+
+
 def _echo_decision(r: dict) -> None:  # type: ignore[type-arg]
+    _exit_if_expired(r)
     if r.get("allowed"):
         typer.echo(f"已受理：{r.get('client_order_id')}（{r.get('status') or r.get('reason')}）")
     else:
@@ -382,6 +390,7 @@ def rule_add(ctx: typer.Context, path: Path) -> None:
         typer.echo(f"读不了规则文件 {path}：{e.strerror or e}", err=True)
         raise typer.Exit(EXIT_CONFIG) from None
     r = _submit(ctx, "rule_add", {"yaml": text})
+    _exit_if_expired(r)
     if r.get("allowed"):
         typer.echo(f"规则 {r['rule_id']} 已添加，入场单 {r['entry_cid']}")
     else:
@@ -393,6 +402,7 @@ def rule_add(ctx: typer.Context, path: Path) -> None:
 def rule_cancel(ctx: typer.Context, rule_id: str) -> None:
     """取消规则：撤入场单余量、停止监控；还有持仓时提示不再受保护（M6b 默认做法 3）。"""
     r = _submit(ctx, "rule_cancel", {"rule_id": rule_id})
+    _exit_if_expired(r)
     typer.echo(f"规则 {rule_id}：{r.get('status')}")
     if r.get("unprotected_qty"):
         typer.echo(f"注意：持仓 {r['unprotected_qty']} 股不再受止损止盈保护", err=True)

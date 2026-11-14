@@ -2,7 +2,7 @@
 
 **当前（M6b，分支 `dev/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
 **M4 审查修复已合并进本分支**（2026-11-14，fb1580e、4edf086）：解决了 7 个文件的冲突（规则引擎和 resume 签名共用 `CommandProcessor`；`poll_stale_quotes` 留在命令线程，心跳改为独立线程）。`pytest` 755 passed，`pytest -m pg` 43 passed；常驻进程和规则引擎的线程测试连跑 5 次都通过
-**ADR-0030**（2026-11-14，你选 C）：`rule_add`、`rule_cancel` 也随命令行超时过期；halt、resume 不过期。`pytest` 759 passed，`pytest -m pg` 43 passed
+**ADR-0030**（2026-11-14，你选 C）：`rule_add`、`rule_cancel` 也随命令行超时过期；halt、resume 不过期。`pytest` 759 passed，`pytest -m pg` 43 passed。命令行拿到 expired 结果时提示「命令已过期，未执行」（下单、撤单、规则命令都是），`pytest` 763 passed
 **M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**（周一常规时段，你用 `!` 运行，各项之间间隔 31 秒）：先做 M3 的事项（见「待你处理」）→ `! uv run mooapp db migrate`（执行 0002）→ 探针 P10 → `pytest -m sim` → M4 验收 `tests/acceptance/test_m4_halt.py` → 结束后 `! uv run mooapp resume`
