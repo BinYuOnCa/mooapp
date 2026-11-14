@@ -1,7 +1,8 @@
 """常驻进程 `mooapp run` 的组装与生命周期（SPEC 3.4；M4 计划设计要点；M4 验收草稿使用 build_runtime）。
 
 - 只有常驻进程构造 RiskGate、OMS、Executor 和券商连接，并持有单实例锁（PostgreSQL advisory lock，按 schema 区分）
-- 启动：拿锁 → 事件线程 → 恢复规则（M6b）→ OMS 启动恢复（完成前闸门拒绝新单）→ 轮询 → 命令线程（每秒心跳；LISTEN mooapp_commands 唤醒，另有 1 秒轮询兜底）
+- 启动：拿锁 → 事件线程 → 恢复规则（M6b）→ OMS 启动恢复（完成前闸门拒绝新单）→ 轮询 → 遗留命令标 error
+  → 心跳线程（每秒，独立于命令处理）→ 命令线程（LISTEN mooapp_commands 唤醒，另有 1 秒轮询兜底；LISTEN 出错也只报警、继续）
 - 停止：停命令线程、轮询、事件线程 → 上锁（ADR-0015，模拟盘下无操作）→ 关券商连接 → 释放单实例锁 → 关数据库连接
 - 本模块只负责组装：不调用 place_order / cancel_order，也不调用 Executor 的写方法（tests/unit/test_write_path.py）
 - REAL：M4 仍关闭（确认点 4），build_runtime 直接拒绝
@@ -26,12 +27,14 @@ from mooapp.oms.oms import OMS
 from mooapp.oms.poller import Poller
 from mooapp.oms.pump import EventPump
 from mooapp.oms.store import Store
-from mooapp.ops.commands import CommandProcessor
+from mooapp.ops.commands import HEARTBEAT_KEY, CommandProcessor
 from mooapp.risk.gate import RiskGate
 
 log = logging.getLogger(__name__)
 SCHEMA = {Env.SIMULATE: "simulate", Env.REAL: "real"}
 COMMAND_WAKE_SECONDS = 1.0
+HEARTBEAT_SECONDS = 1.0
+HEARTBEAT_ALERT_EVERY = 60.0  # 心跳写失败时最多每 60 秒报警一次
 
 
 class RealDisabled(MooappError):
@@ -61,6 +64,8 @@ class Runtime:
     closers: list[Callable[[], None]] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
+    _hb_thread: threading.Thread | None = None
+    _hb_last_alert: float | None = None
     _locked: bool = False
 
     def start(self) -> None:
@@ -73,26 +78,46 @@ class Runtime:
             self.engine.recover()  # 先恢复规则：OMS 启动恢复产生的 OrderChanged 会补喂停机期间的成交
         self.oms.recover()
         self.poller.start()
-        self.processor.heartbeat()
+        self.processor.recover_orphans()  # 已持有单实例锁：running 的命令只可能是上一个进程留下的
+        self._beat()
         self._stop.clear()
+        self._hb_thread = threading.Thread(target=self._heartbeat_loop, name="mooapp-heartbeat", daemon=True)
+        self._hb_thread.start()
         self._thread = threading.Thread(target=self._command_loop, name="mooapp-commands", daemon=True)
         self._thread.start()
         log.info("mooapp run 已启动（%s）", self.env.value)
 
+    def _beat(self) -> None:
+        # 直接写数据库（不经 journal）：库不可用时命令行本来就连不上，心跳写进 journal 只会每秒堆一条
+        with self.store.transaction():
+            self.store.set_kv(HEARTBEAT_KEY, self.clock.now().isoformat())
+
+    def _heartbeat_loop(self) -> None:
+        """M4 审查 #9：心跳独立于命令处理，慢命令不会让命令行误判常驻进程不在。"""
+        while not self._stop.wait(HEARTBEAT_SECONDS):
+            try:
+                self._beat()
+            except Exception as e:  # 记日志；报警限频；下一秒再试
+                log.exception("写心跳失败")
+                now = self.clock.monotonic()
+                if self._hb_last_alert is None or now - self._hb_last_alert >= HEARTBEAT_ALERT_EVERY:
+                    self._hb_last_alert = now
+                    self.bus.publish(Alert("heartbeat_failed", f"{type(e).__name__}：{e}"))
+
     def _command_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.processor.heartbeat()
                 if self.engine is not None:
                     self.engine.poll_stale_quotes()  # 行情兜底（只排队，由事件线程执行）
                 while not self._stop.is_set() and self.processor.process_one():
                     pass
-            except Exception as e:  # 心跳或取命令失败（例如数据库断开）：记日志、报警，下一秒再试
+                if self.listen is not None:
+                    self.listen(COMMAND_WAKE_SECONDS)  # M4 审查 #6：放在 try 里，LISTEN 断开不让命令线程退出
+                else:
+                    self._stop.wait(COMMAND_WAKE_SECONDS)
+            except Exception as e:  # 取命令或 LISTEN 失败（例如数据库断开）：记日志、报警，下一秒再试
                 log.exception("命令线程出错")
                 self.bus.publish(Alert("runner_error", f"{type(e).__name__}：{e}"))
-            if self.listen is not None:
-                self.listen(COMMAND_WAKE_SECONDS)
-            else:
                 self._stop.wait(COMMAND_WAKE_SECONDS)
 
     def stop(self) -> None:
@@ -110,6 +135,8 @@ class Runtime:
         self._stop.set()
         if self._thread is not None:
             step("命令线程", lambda: self._thread.join(10.0) if self._thread else None)
+        if self._hb_thread is not None:
+            step("心跳线程", lambda: self._hb_thread.join(5.0) if self._hb_thread else None)
         step("轮询", self.poller.stop)
         if self.engine is not None:
             step("规则动作线程", self.engine.stop)
@@ -157,7 +184,19 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
         oms = OMS(store=jstore, broker=broker, bus=bus, clock=clock, env=env, journal=journal)  # type: ignore[arg-type]
         pump = EventPump(oms, threaded=True)
         pump.attach(broker)
-        executor = Executor(oms=oms, broker=broker, pump=pump, clock=clock, bus=bus)
+        def background(fn: Callable[[], object]) -> None:
+            """确认后的自动撤单在独立线程里调用券商，不占事件线程（M4 审查小问题）。"""
+
+            def go() -> None:
+                try:
+                    fn()
+                except Exception as e:  # 记日志并报警，不吞
+                    log.exception("后台撤单出错")
+                    bus.publish(Alert("background_error", f"{type(e).__name__}：{e}"))
+
+            threading.Thread(target=go, name="mooapp-background", daemon=True).start()
+
+        executor = Executor(oms=oms, broker=broker, pump=pump, clock=clock, bus=bus, background=background)
         oms.set_executor(executor)
         poller = Poller(broker=broker, pump=pump, env=env, bus=bus, interval=float(settings.quote.poll_fallback_seconds))
         gate = RiskGate(
@@ -170,7 +209,7 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
             gate=gate, oms=oms, store=jstore, md=broker, bus=bus, clock=clock, pump=pump,  # type: ignore[arg-type]
             poll_fallback_seconds=float(settings.quote.poll_fallback_seconds), threaded_actions=True,
         )  # fmt: skip
-        processor = CommandProcessor(gate=gate, store=jstore, clock=clock, bus=bus, engine=engine)  # type: ignore[arg-type]
+        processor = CommandProcessor(gate=gate, store=jstore, clock=clock, bus=bus, engine=engine, resume_key=_resume_key())  # type: ignore[arg-type]
 
         listen_conn = psycopg.connect(dsn, autocommit=True)
         closers.append(listen_conn.close)
@@ -189,3 +228,22 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
         env=env, clock=clock, broker=broker, md=broker, store=store, bus=bus, oms=oms, pump=pump, poller=poller,  # type: ignore[arg-type]
         executor=executor, gate=gate, processor=processor, engine=engine, listen=listen, closers=closers,
     )  # fmt: skip
+
+
+def _resume_key() -> bytes | None:
+    """ADR-0029：只读 secrets 的 [resume] key；读不到或没配时返回 None（常驻进程照常运行，但拒绝一切 resume）。"""
+    from mooapp.config.loader import ConfigError, load_secrets
+
+    try:
+        key = load_secrets().resume_key
+    except ConfigError as e:
+        log.warning("读不到 secrets 的 [resume] key（%s）：本进程将拒绝 resume", e)
+        return None
+    if key is None or not key.get_secret_value():
+        log.warning("secrets 里没有 [resume] key：本进程将拒绝 resume")
+        return None
+    try:
+        return bytes.fromhex(key.get_secret_value())
+    except ValueError:
+        log.warning("[resume] key 不是十六进制：本进程将拒绝 resume")
+        return None

@@ -14,14 +14,18 @@ import pytest
 from oms_harness import make_system
 
 from mooapp.ops.commands import CommandClient, CommandProcessor, CommandTimeout, RunnerNotRunning
+from mooapp.ops.resume_auth import resume_payload
 from mooapp.oms.state import OrdStatus
 
 S = OrdStatus
 
 
+RESUME_KEY = bytes.fromhex("33" * 32)  # 测试用；ADR-0029 的 resume 签名
+
+
 def setup(**kw):
     sys = make_system(**kw)
-    proc = CommandProcessor(gate=sys.gate, store=sys.store, clock=sys.clock, bus=sys.bus)
+    proc = CommandProcessor(gate=sys.gate, store=sys.store, clock=sys.clock, bus=sys.bus, resume_key=RESUME_KEY)
     client = CommandClient(store=sys.store, clock=sys.clock, timeout=10.0, poll_interval=0.5)
     return sys, proc, client
 
@@ -87,7 +91,7 @@ def test_cancel_and_halt_and_resume():
     c = client.enqueue("halt", {"reason": "测试"}, actor="cli")
     proc.process_one()
     assert client.wait(c)["halted"] is True and sys.gate.halted
-    c = client.enqueue("resume", {}, actor="cli")
+    c = client.enqueue("resume", resume_payload(RESUME_KEY, sys.clock.now()), actor="cli")
     proc.process_one()
     assert client.wait(c)["halted"] is False and not sys.gate.halted
 

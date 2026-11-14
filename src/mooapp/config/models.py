@@ -133,6 +133,8 @@ class Secrets(BaseModel):
     real_password: SecretStr | None = Field(
         default=None, validation_alias=AliasPath("postgres", "real_password")
     )
+    # ADR-0029：resume 命令签名密钥（hex）。SIMULATE 下的常驻进程和 mooapp resume 也只读这一项
+    resume_key: SecretStr | None = Field(default=None, validation_alias=AliasPath("resume", "key"))
 
     @field_validator("real_acc_id", mode="before")
     @classmethod

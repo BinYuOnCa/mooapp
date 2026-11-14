@@ -159,6 +159,18 @@ class OMS:
         with self._lock:
             return sum(o.qty - o.cum_qty for o in self.store.list_orders(open_only=True) if o.symbol == symbol and o.side is side)
 
+    def open_leaves_both(self, symbol: str) -> tuple[int, int]:
+        """（买, 卖）两边的未成交剩余量，只扫一次订单表（M4 审查修复）。"""
+        buy = sell = 0
+        with self._lock:
+            for o in self.store.list_orders(open_only=True):
+                if o.symbol == symbol:
+                    if o.side is Side.BUY:
+                        buy += o.qty - o.cum_qty
+                    else:
+                        sell += o.qty - o.cum_qty
+        return buy, sell
+
     def broker_position(self, symbol: str) -> Position | None:
         """券商总持仓（ADR-0019：持仓上限按总持仓算，含程序外部分）。vendor § Get Positions。"""
         for p in self.broker.query_positions():
@@ -183,6 +195,22 @@ class OMS:
         return gross - self.fees_today() if self.env is Env.REAL else gross
 
     # ------------------------------------------------------------------ ADR-0026：确认之前的撤单
+
+    def prepare_cancel(self, client_order_id: str) -> tuple[str, Order | None]:
+        """撤单前的判断与「待撤」标记一步完成（M4 审查修复 #2：避免判断之后确认推送才到的竞态）。
+
+        返回 ("deferred", o)：未确认，已挂待撤标记（ADR-0026）；("send", o)：可以立即撤；("inactive", o)：不可撤；("missing", None)。
+        """
+        with self._lock:
+            o = self.store.get_order(client_order_id)
+            if o is None:
+                return "missing", None
+            if o.status in UNACKED:
+                self.mark_cancel_pending(client_order_id)
+                return "deferred", self.store.get_order(client_order_id)
+            if o.status in (S.NEW, S.PARTIALLY_FILLED) and o.broker_order_id is not None:
+                return "send", o
+            return "inactive", o
 
     def mark_cancel_pending(self, client_order_id: str) -> bool:
         """给 PENDING_NEW / UNKNOWN 的订单挂「待撤」标记。已挂过返回 False（不重复记录）。"""
@@ -486,6 +514,12 @@ class OMS:
         finally:
             self._recovery = None
         report.finished_at = self.clock.now()
+        with self._lock:
+            # M4 审查修复 #8：确认已到、但待撤的撤单还没发出进程就退出了 → 重启后补发
+            due = [o.client_order_id for o in self.store.list_orders(open_only=True)
+                   if o.cancel_pending and o.status in (S.NEW, S.PARTIALLY_FILLED)]  # fmt: skip
+        for cid in due:
+            self.bus.publish(CancelDue(cid))
         self.ready = True
         self.bus.publish(OmsReady())
         log.info("启动恢复完成：检查 %d 张本地未完成订单，差异 %d 条", report.orders_checked, len(report.mismatches))

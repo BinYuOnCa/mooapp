@@ -468,3 +468,40 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
 
 - **结论**：规则要在 OMS 启动恢复之前加载（M6b learnings）。但这时闸门还没就绪，会以 `not_ready` 拒绝所有新单；规则如果在这时发卖单，会被计入失败次数，多重启几次就进入 ERROR。现在 OMS 恢复完成后发 `OmsReady` 事件，在那之前规则的动作先排队
 - **影响**：`oms/oms.py` 的 recover 结尾发 OmsReady；`strategy/engine.py` 收到后执行排队的动作
+
+## M4 审查修复：发现（2026-11-14）
+
+#### 「先查再改」的撤单判断要在 OMS 锁里一步完成
+
+- **结论**：闸门先查订单「还没确认」，再让 Executor 挂待撤标记；两步之间确认推送到达，订单变成 NEW，待撤标记就再也不会被处理（确认已经过去了）。改为 `OMS.prepare_cancel` 持锁一次完成判断和打标记，返回「deferred / send / inactive / missing」
+- **依据**：`tests/unit/test_m4_review.py::test_cancel_not_broken_by_ack_between_check_and_mark`（修复前失败）
+- **影响**：`oms/oms.py`、`oms/executor.py`
+
+#### 库不可用时 halt 不能依赖本地订单表
+
+- **结论**：ADR-0025 说库不可用时撤单照常，但 halt 先 `open_orders()` 读库，库一挂就抛错，一张单都撤不了。改为读不到时从券商 `query_orders(open_only=True)` 取 remark 带 client_order_id 的本程序挂单，带 broker_order_id 直接撤，并报 `halt_degraded`。单张撤单失败（状态已变、券商拒绝）只记入 `failed`，不中断
+- **依据**：`test_halt_cancels_at_broker_when_db_down`、`test_halt_continues_past_order_filled_meanwhile`
+- **影响**：`risk/gate.py`
+
+#### 只写进 journal 的 halt，重启后要在回放之后再读一次
+
+- **结论**：闸门在构造时读 halt，而 journal 是在 OMS 启动恢复时回放的，所以闸门读的时候还没回放。现在 OMS 恢复完成后发 `OmsReady`，闸门收到后再读一次（只并入，不覆盖内存里已有的 halt）
+- **依据**：`test_halt_written_only_to_journal_survives_restart`
+- **影响**：`oms/events.py`、`oms/oms.py`、`risk/gate.py`；M6 分支已有同名事件，合并时以一份为准
+
+#### 心跳和命令处理不能在同一个线程
+
+- **结论**：心跳在命令线程里写，一条慢命令（例如 halt 撤 3 张单、每张都受限频）超过 10 秒，命令行就判定常驻进程不在、拒绝下一条命令。心跳改为独立线程，每秒写一次，写失败最多 60 秒报警一次；心跳直接写数据库、不经 journal（库挂着时写 journal 只会每秒堆一条）
+- **依据**：`test_heartbeat_fresh_while_command_is_slow`（慢命令 4 秒，第 3 秒检查）
+- **影响**：`ops/run.py`
+
+#### 命令行超时之后，命令仍会被执行
+
+- **结论**：命令行等 30 秒没结果就报超时退出，但命令还在表里，常驻进程恢复后照样下单。用户以为没下，可能再下一次。现在 place / cancel 带 `expires_at`（入队时间 + 等待时间），过期才取出的命令结果为 `expired`、不交给闸门；halt 不过期。常驻进程启动时把上一个进程遗留的 running 命令标为 error（结果未知，需人工查询）
+- **依据**：`test_place_command_expires_when_cli_gave_up`、`test_orphaned_running_commands_marked_error_on_start`、`tests/store/test_store_contract.py::test_fail_running_commands_only_touches_running`（内存版和 PostgreSQL 版都过）
+- **影响**：`ops/commands.py`、`oms/store.py`、`oms/pg_store.py`
+
+#### resume 的交互确认只在命令行进程里，命令表本身不设防
+
+- **结论**：能连数据库的任何进程都能往 commands 表插一行 resume，绕过交互终端确认。按 ADR-0029 加 HMAC-SHA256 签名，密钥在 secrets 的 `[resume] key`
+- **影响**：`ops/resume_auth.py`、`ops/commands.py`、`ops/cli.py`、`config/models.py`

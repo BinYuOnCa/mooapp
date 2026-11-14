@@ -1,6 +1,7 @@
 # PROGRESS
 
 **当前（M6b，分支 `dev/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
+**M4 审查修复已合并进本分支**（2026-11-14，fb1580e、4edf086）：解决了 7 个文件的冲突（规则引擎和 resume 签名共用 `CommandProcessor`；`poll_stale_quotes` 留在命令线程，心跳改为独立线程）。`pytest` 755 passed，`pytest -m pg` 43 passed；常驻进程和规则引擎的线程测试连跑 5 次都通过
 **M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**（周一常规时段，你用 `!` 运行，各项之间间隔 31 秒）：先做 M3 的事项（见「待你处理」）→ `! uv run mooapp db migrate`（执行 0002）→ 探针 P10 → `pytest -m sim` → M4 验收 `tests/acceptance/test_m4_halt.py` → 结束后 `! uv run mooapp resume`
@@ -98,6 +99,23 @@
 4. `/milestone-git commit 6`
 
 M6b（另行计划）：rules 表与 `active_rule_for`、Moomoo 的 `subscribe_quotes`、把状态机接到闸门、OMS 和 HaltChanged、`rule add` 和 `rule list`、模拟盘验收 3
+
+## M4 审查修复（已确认 2026-11-14，分支 `dev/milestone_4`）
+
+`/code-review high dev/milestone_4`：8 条 bug 和小问题全部修复；第 5、10 条按你的决定写 ADR-0028、ADR-0029。每条先写复现测试（`tests/unit/test_m4_review.py`）。修完后合并进 `dev/milestone_6`。
+
+1. halt 撤单时，单张订单状态已变（成交、已确认）不中断，记入失败继续撤下一张
+2. 撤单时「判断未确认、挂待撤标记」在 OMS 里一步完成，不再有竞态
+3. 库不可用时 halt 照常：挂单列表改从券商查；本地写撤单请求失败也照样把撤单发给券商（ADR-0025）
+4. OMS 启动恢复（回放 journal）后发 `OmsReady`，闸门据此重新读取 halt 状态（ADR-0022）
+5. 当日亏损触线后只拦买单（ADR-0028）
+6. 等待新命令通知出错不让命令线程退出；心跳改由独立线程每秒写
+7. 下单、撤单命令带过期时间（命令行超时即过期，常驻进程不再执行）；常驻进程启动时把遗留的「处理中」命令标为 error
+8. 启动恢复后，对「已确认且带待撤标记」的订单补发撤单
+9. resume 必须带 HMAC 签名（ADR-0029）：`[resume] key` 放 secrets；常驻进程验签、60 秒内有效、随机数不重复
+10. 小问题：确认后的自动撤单不在事件线程上调用券商；库不可用时审计里注明「上一条通过记录作废」；同一次下单只查一次挂单；第二次 halt 不覆盖第一次的原因；探针 P10 增加「挂卖单前后的 can_sell_qty」（查可卖数量是否已扣掉挂着的卖单）
+
+**状态（2026-11-14）**：全部实现。`pytest` 578 passed，`pytest -m pg` 36 passed；test_m4_review.py 的 27 条复现测试修复前全部失败、现在全部通过。另外：`tests/unit/test_commands.py` 的 resume 测试改为带签名；`tests/store/test_store_contract.py` 新增 `fail_running_commands` 的契约测试；`broker/moomoo.py` 的持仓查询缓存 0.5 秒（下单、撤单、订单推送时清空）。待你：提交（`/milestone-git commit 4`）→ 合并进 `dev/milestone_6`
 
 ## M4 计划（已确认 2026-11-14）
 
@@ -313,6 +331,7 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 
 - [ ] M4（周一）：`! uv run mooapp db migrate`（执行迁移 0002：audit、commands、orders.cancel_pending）
 - [ ] M4（周一常规时段）：`! uv run python scripts/probe_m4_pnl.py`（P10：模拟盘 today_pl_val 是否有效）。无效时闸门会拒绝所有买单，先看 P10 的结果再跑 M4 验收
+- [ ] M4（周一之前）：在 secrets 里加 `[resume] key`（`python3 -c "import secrets; print(secrets.token_hex(32))"` 生成，文件权限保持 600），然后重启 `mooapp run`。没有这把密钥，常驻进程会拒绝所有 resume（ADR-0029）
 - [ ] M4（周一常规时段）：`! uv run pytest -m sim tests/acceptance/test_m4_halt.py`，结束后 `! uv run mooapp resume`（halt 跨重启保留）
 - [ ] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `mooapp.ops.run.build_runtime`（M4 的闸门签名已变，旧写法在 dev/milestone_4 上会失败；你本人修改）
 

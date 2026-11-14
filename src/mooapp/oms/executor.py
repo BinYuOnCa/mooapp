@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from mooapp.broker.port import BrokerError, BrokerPort, OrderRejected, OrderRequest
 from mooapp.clock import Clock
@@ -23,6 +24,7 @@ from mooapp.oms.events import Alert, CancelDue, EventBus
 from mooapp.oms.oms import OMS, UNACKED
 from mooapp.oms.pump import EventPump
 from mooapp.oms.state import MAX_ATTEMPTS, TERMINAL, Event, EventType, Order, OrdStatus
+from mooapp.oms.store import StoreUnavailable
 from mooapp.oms.ticket import TicketBook
 
 log = logging.getLogger(__name__)
@@ -56,6 +58,7 @@ class Executor:
         bus: EventBus,
         resolver_grace: float = 3.0,
         confirm_queries: int = 2,
+        background: Callable[[Callable[[], None]], None] | None = None,
     ):
         self.oms = oms
         self.broker = broker
@@ -65,8 +68,10 @@ class Executor:
         self.resolver_grace = resolver_grace
         self.confirm_queries = confirm_queries
         self._tickets = TicketBook()
-        # ADR-0026：确认后自动撤单。OMS 持锁时发布 CancelDue，这里只排队，由事件线程执行
-        bus.subscribe(CancelDue, lambda e: self.pump.submit_task(lambda cid=e.client_order_id: self._send_deferred_cancel(cid)))
+        # ADR-0026：确认后自动撤单。OMS 持锁时发布 CancelDue，这里只交给 background 执行：
+        # 常驻进程里是独立线程（M4 审查修复：不在事件线程上调用券商，限流等待最长可达 60 秒）；默认排进事件队列（同步测试）
+        self.background: Callable[[Callable[[], None]], None] = background or pump.submit_task
+        bus.subscribe(CancelDue, lambda e: self.background(lambda cid=e.client_order_id: self._send_deferred_cancel(cid)))
 
     # ------------------------------------------------------------------ 下单
 
@@ -125,15 +130,24 @@ class Executor:
 
     # ------------------------------------------------------------------ 撤单
 
-    def cancel(self, ticket: object, client_order_id: str) -> Order:
+    def cancel(self, ticket: object, client_order_id: str, broker_order_id: str | None = None) -> Order | None:
+        """撤单。broker_order_id 只在库不可用时由闸门给出（从券商查到的挂单，ADR-0025）：这时本地读不到订单，直接撤券商端。
+
+        返回撤单后的订单；库不可用、只撤了券商端时返回 None。
+        """
         self._tickets.consume(ticket, "cancel", client_order_id)
         cid = client_order_id
-        o = self.pump.call(lambda: self.oms.get_or_none(cid))
-        if o is not None and o.status in UNACKED:
-            # ADR-0026：订单还没确认，先挂「待撤」标记；确认后由 _send_deferred_cancel 发出
-            self.pump.call(lambda: self.oms.mark_cancel_pending(cid))
-            return self.pump.call(lambda: self.oms.get(cid))
-        if o is None or o.status not in CANCELLABLE or o.broker_order_id is None:
+        try:
+            route, o = self.pump.call(lambda: self.oms.prepare_cancel(cid))  # 判断与挂待撤标记一步完成（审查 #2）
+        except StoreUnavailable:
+            if broker_order_id is None:
+                raise
+            log.error("库不可用，直接撤券商端订单 %s（%s）", broker_order_id, cid)
+            self.broker.cancel_order(broker_order_id)  # vendor § Modify or Cancel Orders
+            return None
+        if route == "deferred":
+            return o  # ADR-0026：确认后由 _send_deferred_cancel 发出
+        if route != "send" or o is None:
             raise OrderNotActive(f"订单 {cid} 不在可撤状态（{o.status.value if o else '不存在'}）")
         return self._send_cancel(o)
 
@@ -152,7 +166,14 @@ class Executor:
     def _send_cancel(self, o: Order) -> Order:
         cid = o.client_order_id
         assert o.broker_order_id is not None
-        self.pump.call(lambda: self.oms.handle_local(cid, Event(E.CANCEL_REQ)))
+        try:
+            self.pump.call(lambda: self.oms.handle_local(cid, Event(E.CANCEL_REQ)))
+        except StoreUnavailable as e:
+            # ADR-0025：库不可用时撤单照常；本地的撤单请求已写进 journal，恢复后补写
+            log.error("撤单请求写不进数据库（已进 journal），照样发出撤单：%s", e)
+            self.bus.publish(Alert("cancel_degraded", f"库不可用，撤单 {cid} 直接发往券商：{e}", cid))
+            self.broker.cancel_order(o.broker_order_id)
+            return o
         try:
             # vendor § Modify or Cancel Orders：返回成功 ≠ 已撤销（异步，learnings M1），等推送或轮询看到 CANCELLED_*
             self.broker.cancel_order(o.broker_order_id)

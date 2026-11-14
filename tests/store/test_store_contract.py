@@ -349,6 +349,24 @@ def test_commands_queue(store):
     assert store.claim_next_command(T) is None
 
 
+def test_fail_running_commands_only_touches_running(store):
+    """M4 审查 #7：启动时把遗留的 running 命令标为 error；pending 和已结束的不动。"""
+    with store.transaction():
+        i1 = store.enqueue_command("halt", {}, "cli", T)
+        i2 = store.enqueue_command("halt", {}, "cli", T)
+        i3 = store.enqueue_command("halt", {}, "cli", T)
+    store.claim_next_command(T)
+    with store.transaction():
+        store.finish_command(i1, "done", {"halted": True}, T)
+    store.claim_next_command(T)  # i2 → running
+    with store.transaction():
+        assert store.fail_running_commands({"error": "重启"}, T) == 1
+    assert store.get_command(i1).status == "done"
+    got = store.get_command(i2)
+    assert got.status == "error" and got.result == {"error": "重启"} and got.finished_at is not None
+    assert store.get_command(i3).status == "pending"
+
+
 def test_runner_lock_exclusive_within_store(store):
     assert store.try_runner_lock() is True
     store.release_runner_lock()

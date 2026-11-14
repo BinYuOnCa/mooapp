@@ -4,7 +4,7 @@
 protective_misuse → whitelist → regular_hours → quote_stale → max_order_qty → max_order_value → max_limit_deviation_pct
 → max_position_qty（买）→ can_sell_qty（卖）→ active_rule → max_daily_orders → max_daily_loss
 
-边界约定：「不超过上限」通过，「超过」拒绝；当日亏损「触及」上限即拒（亏损额 ≥ 上限）。
+边界约定：「不超过上限」通过，「超过」拒绝；当日亏损「触及」上限即拒买单（亏损额 ≥ 上限；卖单放行，ADR-0028）。
 halt 不在这里：它是闸门自己的状态，最先检查。撤单不经过这些规则（ADR-0016）。
 """
 
@@ -180,7 +180,8 @@ def max_daily_loss(ctx: OrderContext, lim: RiskLimits, stale: float) -> Verdict 
         if ctx.req.side is Side.BUY:
             return _reject("max_daily_loss", "当日盈亏不可用（持仓接口 today_pl_val 无效，见探针 P10），不确定时不加仓")
         return None
-    if -ctx.daily_pnl >= lim.max_daily_loss:
+    if -ctx.daily_pnl >= lim.max_daily_loss and ctx.req.side is Side.BUY:
+        # ADR-0028：触线后只拦买单；卖单只减仓，照常放行（数量受 can_sell_qty 约束）
         return _reject(
             "max_daily_loss", f"当日盈亏 {ctx.daily_pnl}，已触及亏损上限 {lim.max_daily_loss}", halt=lim.halt_on_daily_loss
         )

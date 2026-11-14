@@ -171,6 +171,7 @@ class Store(Protocol):
     def claim_next_command(self, ts: datetime) -> CommandRecord | None: ...
     def finish_command(self, command_id: int, status: str, result: dict[str, Any], ts: datetime) -> None: ...
     def get_command(self, command_id: int) -> CommandRecord | None: ...
+    def fail_running_commands(self, result: dict[str, Any], ts: datetime) -> int: ...  # M4 审查 #7：启动时清理遗留的 running
     def try_runner_lock(self) -> bool: ...
     def release_runner_lock(self) -> None: ...
     def active_rule_for(self, symbol: str) -> str | None: ...  # ADR-0020
@@ -357,6 +358,12 @@ class MemoryStore:
     def get_command(self, command_id: int) -> CommandRecord | None:
         c = self._s.commands.get(command_id)
         return copy.deepcopy(c) if c is not None else None
+
+    def fail_running_commands(self, result: dict[str, Any], ts: datetime) -> int:
+        ids = [i for i, c in self._s.commands.items() if c.status == "running"]
+        for i in ids:
+            self._s.commands[i] = replace(self._s.commands[i], status="error", result=copy.deepcopy(result), finished_at=ts)
+        return len(ids)
 
     # M4：常驻进程单实例锁
 

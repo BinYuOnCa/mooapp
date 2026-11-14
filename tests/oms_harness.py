@@ -103,6 +103,7 @@ def make_system(
     limits: RiskLimits = LOOSE_LIMITS,
     stale_after_seconds: float = 3600.0,  # M3 测试里 Resolver 会推进 FakeClock，默认放宽；行情过期规则另测
     open_market: bool = True,
+    journal: Any = None,  # M4 审查修复：OMS 启动恢复时回放的 journal（ADR-0025）
 ) -> System:
     clock = clock or FakeClock(T0)
     broker = broker or FakeBroker(env, clock)
@@ -112,7 +113,7 @@ def make_system(
     bus = EventBus()
     alerts: list[Alert] = []
     bus.subscribe(Alert, alerts.append)
-    oms = OMS(store=store, broker=broker, bus=bus, clock=clock, env=env)
+    oms = OMS(store=store, broker=broker, bus=bus, clock=clock, env=env, journal=journal)
     pump = EventPump(oms, threaded=False)
     if attach:
         pump.attach(broker)
