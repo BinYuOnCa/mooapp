@@ -199,3 +199,48 @@ def test_rule_commands_without_engine_are_errors():
     proc.process_one()
     with pytest.raises(RuntimeError, match="规则引擎"):
         client.wait(c)
+
+
+# ------------------------------------------------------------------ ADR-0030：rule_add、rule_cancel 也会过期
+
+
+def test_rule_add_expires_when_cli_gave_up():
+    sys, eng, proc, client = setup_with_engine()
+    c = client.enqueue("rule_add", {"yaml": RULE_YAML}, actor="cli:test")
+    sys.clock.advance(11)  # 命令行 10 秒超时之后才被处理
+    proc.process_one()
+    r = sys.store.get_command(c).result
+    assert r["allowed"] is False and r["rule"] == "expired"
+    assert sys.broker.calls("place_order") == []
+    assert sys.store.get_rule("spy-oco-1") is None
+
+
+def test_rule_cancel_expires_when_cli_gave_up():
+    sys, eng, proc, client = setup_with_engine()
+    c = client.enqueue("rule_add", {"yaml": RULE_YAML}, actor="cli:test")
+    proc.process_one()
+    assert client.wait(c)["allowed"] is True
+    c = client.enqueue("rule_cancel", {"rule_id": "spy-oco-1"}, actor="cli:test")
+    sys.clock.advance(11)
+    proc.process_one()
+    r = sys.store.get_command(c).result
+    assert r["allowed"] is False and r["rule"] == "expired" and r["rule_id"] == "spy-oco-1"
+    assert sys.store.get_rule("spy-oco-1").status != "CANCELED"
+    assert sys.broker.calls("cancel_order") == []
+
+
+def test_rule_commands_within_timeout_still_run():
+    sys, eng, proc, client = setup_with_engine()
+    c = client.enqueue("rule_add", {"yaml": RULE_YAML}, actor="cli:test")
+    sys.clock.advance(9)
+    proc.process_one()
+    assert client.wait(c)["allowed"] is True
+
+
+def test_halt_and_resume_never_expire():
+    sys, proc, client = setup()
+    c = client.enqueue("halt", {"reason": "x"}, actor="cli")
+    sys.clock.advance(3600)
+    proc.process_one()
+    assert client.wait(c)["halted"] is True
+    assert "expires_at" not in sys.store.get_command(c).payload
