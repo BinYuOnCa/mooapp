@@ -21,7 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from mooapp.broker import opend
-from mooapp.broker.convert import FillSynthesizer, cash_from_row, order_from_row, position_from_row, quote_from_row
+from mooapp.broker.convert import (
+    FillSynthesizer,
+    cash_from_row,
+    order_from_row,
+    position_from_row,
+    quote_from_row,
+    today_pnl_from_rows,
+)
 from mooapp.broker.port import (
     BrokerError,
     BrokerFill,
@@ -34,7 +41,7 @@ from mooapp.broker.port import (
     Quote,
 )
 from mooapp.broker.recorder import PushRecorder
-from mooapp.broker.throttle import ThrottledBroker
+from mooapp.broker.throttle import SHARED_REGISTRY, ThrottledBroker
 from mooapp.clock import Clock
 from mooapp.common import Env, OrderKind, Side
 from mooapp.config.models import BrokerCfg
@@ -190,6 +197,14 @@ class MoomooBroker:
         )
         return [p for p in (position_from_row(r) for r in rows) if p is not None]
 
+    def query_today_pnl(self) -> Decimal | None:
+        # vendor § Get Positions › today_pl_val；走缓存（只有刷新缓存时才受限频）；全部行，含 qty=0
+        rows = self._rows(
+            "position_list_query",
+            self._trade.position_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=False),
+        )
+        return today_pnl_from_rows(rows)
+
     def query_cash(self) -> Cash:
         # vendor § Get Account Funds：currency 只对综合账户生效；与 M1 一致显式传 USD
         rows = self._rows(
@@ -280,4 +295,5 @@ def open_broker(
         if recorder is not None:
             recorder.close()
         raise
-    return ThrottledBroker(broker, clock)
+    # 限频按账户计算（learnings M3）：同一进程里按 (env, acc_id) 共用限流器
+    return ThrottledBroker(broker, clock, registry=SHARED_REGISTRY, account_key=(env, cfg.simulate_acc_id))

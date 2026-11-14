@@ -2,13 +2,14 @@
 
 - 一个实例只对应一个 schema（search_path 固定），不做跨环境查询
 - 连接后断言 current_schema() 等于指定 schema，且当前角色对另一个 schema（存在时）没有 USAGE（Q20）
-- 单连接；psycopg 连接本身是线程安全的，OMS 用自己的锁把读写串行化（3.4 节：单消费线程）
+- 单连接；一把可重入锁保证一个事务从头到尾只属于一个线程（常驻进程里多个线程共用本实例）
 - 约束错误 → StoreError；连接类错误 → StoreUnavailable；都保留原异常链，不吞
 - DSN 含密码，不写日志（SPEC 5.4 dsn_for）
 """
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, TypeVar
@@ -20,15 +21,28 @@ from psycopg.types.json import Jsonb
 
 from mooapp.common import OrderKind, Side, Source
 from mooapp.oms.state import Order, OrdStatus
-from mooapp.oms.store import EventRecord, FillRecord, ReconRecord, StoreError, StoreUnavailable, check_event
+from mooapp.oms.store import (
+    COMMAND_FINAL,
+    AuditRecord,
+    CommandRecord,
+    EventRecord,
+    FillRecord,
+    ReconRecord,
+    StoreError,
+    StoreUnavailable,
+    check_event,
+)
 
 T = TypeVar("T")
 
 _ORDER_COLS = (
     "client_order_id, broker_order_id, source, symbol, side, kind, qty, limit_price, cl_ord_id, status, base_status,"
     " cum_qty, avg_fill_price, pending_qty, pending_price, pending_cl_ord_id, orig_cl_ord_ids, attempts, reason,"
-    " raw_status, raw_dealt_qty, created_at, updated_at"
+    " raw_status, raw_dealt_qty, cancel_pending, created_at, updated_at"
 )
+_N_ORDER_COLS = 24
+_AUDIT_COLS = "ts, action, source, actor, client_order_id, symbol, side, qty, price, allowed, rule, reason, details"
+_COMMAND_COLS = "id, created_at, kind, payload, actor, status, result, claimed_at, finished_at"
 _EVENT_COLS = "client_order_id, event_type, origin, outcome, from_status, to_status, exec_id, qty, price, raw_status, reason, payload, ts"
 _FILL_COLS = "fill_id, client_order_id, broker_order_id, symbol, side, qty, price, ts, synthetic, origin"
 
@@ -38,7 +52,7 @@ def _order_params(o: Order) -> tuple[Any, ...]:
         o.client_order_id, o.broker_order_id, o.source.value, o.symbol, o.side.value, o.kind.value, o.qty, o.price,
         o.cl_ord_id, o.status.value, o.base_status.value if o.base_status else None, o.cum_qty, o.avg_px,
         o.pending_qty, o.pending_price, o.pending_cl_ord_id, list(o.orig_cl_ord_ids), o.attempts, o.reason,
-        o.raw_status, o.raw_dealt_qty, o.created_at, o.updated_at,
+        o.raw_status, o.raw_dealt_qty, o.cancel_pending, o.created_at, o.updated_at,
     )  # fmt: skip
 
 
@@ -65,6 +79,7 @@ def _order_from(r: dict[str, Any]) -> Order:
         reason=r["reason"],
         raw_status=r["raw_status"],
         raw_dealt_qty=r["raw_dealt_qty"],
+        cancel_pending=r["cancel_pending"],
         created_at=r["created_at"],
         updated_at=r["updated_at"],
     )
@@ -102,6 +117,8 @@ class PostgresStore:
             self._conn.close()
             raise
         self._depth = 0
+        # 常驻进程里命令线程、事件线程、调用方会共用这个连接：一把可重入锁让一个事务从头到尾只属于一个线程
+        self._mutex = threading.RLock()
 
     def close(self) -> None:
         self._conn.close()
@@ -110,10 +127,11 @@ class PostgresStore:
 
     def _run(self, fn: Callable[[psycopg.Connection[Any]], T]) -> T:
         try:
-            if self._depth:
-                return fn(self._conn)
-            with self._conn.transaction():
-                return fn(self._conn)
+            with self._mutex:
+                if self._depth:
+                    return fn(self._conn)
+                with self._conn.transaction():
+                    return fn(self._conn)
         except psycopg.OperationalError as e:
             raise StoreUnavailable(f"数据库不可用：{e}") from e
         except psycopg.Error as e:
@@ -122,7 +140,7 @@ class PostgresStore:
     @contextmanager
     def transaction(self) -> Iterator[None]:
         try:
-            with self._conn.transaction():
+            with self._mutex, self._conn.transaction():
                 self._depth += 1
                 try:
                     yield
@@ -136,7 +154,7 @@ class PostgresStore:
     # ------------------------------------------------------------------ orders
 
     def insert_order(self, o: Order) -> None:
-        q = f"INSERT INTO orders ({_ORDER_COLS}) VALUES ({', '.join(['%s'] * 23)})"
+        q = f"INSERT INTO orders ({_ORDER_COLS}) VALUES ({', '.join(['%s'] * _N_ORDER_COLS)})"
         self._run(lambda c: c.execute(q, _order_params(o)))
 
     def update_order(self, o: Order) -> None:
@@ -239,3 +257,86 @@ class PostgresStore:
 
     def is_journal_applied(self, entry_id: str) -> bool:
         return self._run(lambda c: c.execute("SELECT 1 FROM journal_applied WHERE entry_id = %s", (entry_id,)).fetchone()) is not None
+
+    # ------------------------------------------------------------------ M4：audit（只追加）
+
+    def append_audit(self, a: AuditRecord) -> None:
+        q = f"INSERT INTO audit ({_AUDIT_COLS}) VALUES ({', '.join(['%s'] * 13)})"
+        p = (a.ts, a.action, a.source, a.actor, a.client_order_id, a.symbol, a.side, a.qty, a.price, a.allowed, a.rule, a.reason,
+             Jsonb(a.details))  # fmt: skip
+        self._run(lambda c: c.execute(q, p))
+
+    def audit_records(self) -> list[AuditRecord]:
+        rows = self._run(lambda c: c.execute(f"SELECT {_AUDIT_COLS} FROM audit ORDER BY id").fetchall())
+        return [AuditRecord(**r) for r in rows]
+
+    # ------------------------------------------------------------------ M4：当日下单次数（ADR-0018）
+
+    def count_submitted_between(self, start: Any, end: Any) -> int:
+        r = self._run(
+            lambda c: c.execute(
+                "SELECT count(DISTINCT client_order_id) AS n FROM order_events"
+                " WHERE event_type = 'SUBMIT' AND outcome = 'applied' AND ts >= %s AND ts < %s",
+                (start, end),
+            ).fetchone()
+        )
+        return int(r["n"])
+
+    # ------------------------------------------------------------------ M4：commands（SPEC 3.4）
+
+    def enqueue_command(self, kind: str, payload: dict[str, Any], actor: str, ts: Any) -> int:
+        r = self._run(
+            lambda c: c.execute(
+                "INSERT INTO commands (created_at, kind, payload, actor) VALUES (%s, %s, %s, %s) RETURNING id",
+                (ts, kind, Jsonb(payload), actor),
+            ).fetchone()
+        )
+        return int(r["id"])
+
+    def claim_next_command(self, ts: Any) -> CommandRecord | None:
+        # FOR UPDATE SKIP LOCKED：多个连接同时取命令时互不重复
+        r = self._run(
+            lambda c: c.execute(
+                f"UPDATE commands SET status = 'running', claimed_at = %s WHERE id = ("
+                " SELECT id FROM commands WHERE status = 'pending' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1"
+                f") RETURNING {_COMMAND_COLS}",
+                (ts,),
+            ).fetchone()
+        )
+        return CommandRecord(**r) if r else None
+
+    def finish_command(self, command_id: int, status: str, result: dict[str, Any], ts: Any) -> None:
+        if status not in COMMAND_FINAL:
+            raise StoreError(f"commands.status 只能结束为 {sorted(COMMAND_FINAL)}，收到 {status!r}")
+
+        def go(c: psycopg.Connection[Any]) -> None:
+            cur = c.execute(
+                "UPDATE commands SET status = %s, result = %s, finished_at = %s WHERE id = %s",
+                (status, Jsonb(result), ts, command_id),
+            )
+            if cur.rowcount != 1:
+                raise StoreError(f"commands 没有 {command_id}")
+
+        self._run(go)
+
+    def get_command(self, command_id: int) -> CommandRecord | None:
+        r = self._run(lambda c: c.execute(f"SELECT {_COMMAND_COLS} FROM commands WHERE id = %s", (command_id,)).fetchone())
+        return CommandRecord(**r) if r else None
+
+    # ------------------------------------------------------------------ M4：常驻进程单实例锁（SPEC 3.4：advisory lock，按 schema 区分）
+
+    def _lock_key(self) -> str:
+        return f"mooapp_runner:{self.schema}"
+
+    def try_runner_lock(self) -> bool:
+        r = self._run(lambda c: c.execute("SELECT pg_try_advisory_lock(hashtext(%s)) AS ok", (self._lock_key(),)).fetchone())
+        return bool(r["ok"])
+
+    def release_runner_lock(self) -> None:
+        r = self._run(lambda c: c.execute("SELECT pg_advisory_unlock(hashtext(%s)) AS ok", (self._lock_key(),)).fetchone())
+        if not r["ok"]:
+            raise StoreError("释放单实例锁失败：当前连接没有持有它")
+
+    # ADR-0020：该标的的活动规则 id。rules 表在 M6 建立（规则状态由 strategy 写入 Store）；之前没有任何规则
+    def active_rule_for(self, symbol: str) -> str | None:
+        return None

@@ -14,6 +14,7 @@ M3 新增（测试辅助）：
 - replay(rows)：把录制的推送行（PushRecorder 格式里的 row）经 order_from_row 推给回调，同时更新券商端状态
 - seed_order / seed_fill：预置券商端订单或成交，不推送
 - REAL 环境的 fill() 生成非合成的成交 id（D1、D2…），模拟实盘成交推送带 deal_id（vendor § Deals Push Callback）
+- M4：set_today_pnl / query_today_pnl（当日盈亏，None 表示字段无效）
 """
 
 from __future__ import annotations
@@ -100,6 +101,7 @@ class FakeBroker:
         self._fill_cbs: list[Callable[[BrokerFill], None]] = []
         self._place_failures: deque[tuple[BrokerError, bool]] = deque()
         self._next_deal = 1
+        self._today_pnl: Decimal | None = Decimal(0)  # M4：query_today_pnl 的返回值，测试用 set_today_pnl 设置
 
     # ------------------------------------------------------------------ 测试辅助（M3）
 
@@ -147,6 +149,11 @@ class FakeBroker:
     def set_position(self, symbol: str, qty: int, avg_cost: Decimal) -> None:
         with self._lock:
             self._positions[symbol] = _Pos(qty, avg_cost * qty)
+
+    def set_today_pnl(self, value: Decimal | None) -> None:
+        """M4：设定当日盈亏（None 表示 today_pl_val 无效）。FakeBroker 不按成交推算盈亏。"""
+        with self._lock:
+            self._today_pnl = value
 
     def step(self) -> None:
         """处理排队的状态变化并推送。"""
@@ -319,6 +326,11 @@ class FakeBroker:
                 for s, p in self._positions.items()
                 if p.qty > 0
             ]
+
+    def query_today_pnl(self) -> Decimal | None:
+        with self._lock:
+            self._record("query_today_pnl")
+            return self._today_pnl
 
     def query_cash(self) -> Cash:
         with self._lock:

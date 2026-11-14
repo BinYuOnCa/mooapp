@@ -3,7 +3,8 @@
 - threaded=True（常驻进程）：一个队列 + 一个消费线程，依次调用 OMS；SDK 推送回调只负责入队
 - threaded=False（测试）：入队后不处理，测试显式 drain()，便于构造重复、乱序、丢失
 - call(fn)：本地动作（建单、SUBMIT、撤单请求等）排在已入队事件之后执行并返回结果。
-  同步模式下先 drain 再执行；线程模式下入队并等待；消费线程未启动或就在消费线程里时直接执行
+  同步模式下先 drain 再执行（drain 进行中则直接执行，不嵌套）；线程模式下入队并等待；消费线程未启动或就在消费线程里时直接执行
+- submit_task(fn)：排队执行、不等结果（ADR-0026 的自动撤单）
 - 消费线程处理某条事件出错：记 ERROR 日志（含堆栈）并发 Alert("pump_error")，继续处理下一条——
   不吞错，也不让一条坏事件卡死整条通道
 """
@@ -32,6 +33,7 @@ class EventPump:
         self.threaded = threaded
         self._q: queue.Queue[Any] = queue.Queue()
         self._thread: threading.Thread | None = None
+        self._draining = False  # 同步模式：drain 期间被处理的事件再调用 call()，不嵌套 drain
 
     # ------------------------------------------------------------------ 入队
 
@@ -40,6 +42,10 @@ class EventPump:
 
     def submit_fill(self, fill: BrokerFill, origin: str) -> None:
         self._q.put(("fill", fill, origin))
+
+    def submit_task(self, fn: Callable[[], object]) -> None:
+        """排队执行一个本地动作，不等结果（例如 ADR-0026 确认后自动撤单：在 OMS 持锁时发布，处理方不能阻塞）。"""
+        self._q.put(("task", fn))
 
     def attach(self, broker: BrokerPort) -> None:
         """订阅券商推送（vendor § Orders Push Callback、§ Deals Push Callback）。合成成交不入队：OMS 自己按快照算。"""
@@ -54,6 +60,8 @@ class EventPump:
             self.oms.ingest_snapshot(item[1], item[2])
         elif kind == "fill":
             self.oms.ingest_fill(item[1], item[2])
+        elif kind == "task":
+            item[1]()
         else:
             raise ValueError(f"未知的队列项 {kind!r}")
 
@@ -61,15 +69,21 @@ class EventPump:
         if self.threaded:
             self._q.join()
             return
-        while True:
-            try:
-                item = self._q.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                self._process(item)
-            finally:
-                self._q.task_done()
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            while True:
+                try:
+                    item = self._q.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    self._process(item)
+                finally:
+                    self._q.task_done()
+        finally:
+            self._draining = False
 
     def call(self, fn: Callable[[], T]) -> T:
         running = self._thread is not None and self._thread.is_alive()

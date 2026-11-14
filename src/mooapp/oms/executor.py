@@ -19,15 +19,16 @@ import logging
 from mooapp.broker.port import BrokerError, BrokerPort, OrderRejected, OrderRequest
 from mooapp.clock import Clock
 from mooapp.common import MooappError, OrderKind, Source
-from mooapp.oms.events import Alert, EventBus
-from mooapp.oms.oms import OMS
+from mooapp.oms.events import Alert, CancelDue, EventBus
+from mooapp.oms.oms import OMS, UNACKED
 from mooapp.oms.pump import EventPump
-from mooapp.oms.state import MAX_ATTEMPTS, Event, EventType, Order, OrdStatus
+from mooapp.oms.state import MAX_ATTEMPTS, TERMINAL, Event, EventType, Order, OrdStatus
 from mooapp.oms.ticket import TicketBook
 
 log = logging.getLogger(__name__)
 S, E = OrdStatus, EventType
-CANCELLABLE = frozenset({S.NEW, S.PARTIALLY_FILLED})
+CANCELLABLE = frozenset({S.NEW, S.PARTIALLY_FILLED})  # 可以立即撤
+CANCEL_ACCEPTED = CANCELLABLE | UNACKED  # 闸门受理的撤单：未确认的按 ADR-0026 挂「待撤」标记
 
 
 class OrderNotActive(MooappError):
@@ -64,6 +65,8 @@ class Executor:
         self.resolver_grace = resolver_grace
         self.confirm_queries = confirm_queries
         self._tickets = TicketBook()
+        # ADR-0026：确认后自动撤单。OMS 持锁时发布 CancelDue，这里只排队，由事件线程执行
+        bus.subscribe(CancelDue, lambda e: self.pump.submit_task(lambda cid=e.client_order_id: self._send_deferred_cancel(cid)))
 
     # ------------------------------------------------------------------ 下单
 
@@ -126,8 +129,29 @@ class Executor:
         self._tickets.consume(ticket, "cancel", client_order_id)
         cid = client_order_id
         o = self.pump.call(lambda: self.oms.get_or_none(cid))
+        if o is not None and o.status in UNACKED:
+            # ADR-0026：订单还没确认，先挂「待撤」标记；确认后由 _send_deferred_cancel 发出
+            self.pump.call(lambda: self.oms.mark_cancel_pending(cid))
+            return self.pump.call(lambda: self.oms.get(cid))
         if o is None or o.status not in CANCELLABLE or o.broker_order_id is None:
             raise OrderNotActive(f"订单 {cid} 不在可撤状态（{o.status.value if o else '不存在'}）")
+        return self._send_cancel(o)
+
+    def _send_deferred_cancel(self, cid: str) -> None:
+        """ADR-0026：在事件线程里执行。撤单失败不抛给事件线程（那里没有调用者），而是报警。"""
+        o = self.pump.call(lambda: self.oms.get(cid))
+        if not o.cancel_pending or o.status in TERMINAL:
+            return  # 已经发过，或订单已结束
+        if o.status not in CANCELLABLE or o.broker_order_id is None:
+            return  # 还没确认，等下一次 CancelDue
+        try:
+            self._send_cancel(o)
+        except BrokerError as e:
+            self.bus.publish(Alert("deferred_cancel_failed", f"确认后自动撤单失败：{e}", cid))
+
+    def _send_cancel(self, o: Order) -> Order:
+        cid = o.client_order_id
+        assert o.broker_order_id is not None
         self.pump.call(lambda: self.oms.handle_local(cid, Event(E.CANCEL_REQ)))
         try:
             # vendor § Modify or Cancel Orders：返回成功 ≠ 已撤销（异步，learnings M1），等推送或轮询看到 CANCELLED_*

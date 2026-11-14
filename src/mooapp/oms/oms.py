@@ -14,17 +14,18 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
-from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, NotSupported, OrderRequest
+from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, NotSupported, OrderRequest, Position
 from mooapp.clock import Clock
-from mooapp.common import Env, MooappError, Source
-from mooapp.oms.events import Alert, DealPollRequested, EventBus
+from mooapp.common import Env, MooappError, Side, Source
+from mooapp.oms.events import Alert, CancelDue, DealPollRequested, EventBus
 from mooapp.oms.journal import Journal, ReplayReport, replay_journal
 from mooapp.oms.mapping import map_snapshot
-from mooapp.oms.state import Event, EventType, Order, OrderError, OrdStatus, apply
+from mooapp.oms.state import TERMINAL, Event, EventType, Order, OrderError, OrdStatus, apply
 from mooapp.oms.store import EventRecord, FillRecord, Store, StoreError
 
 if TYPE_CHECKING:
@@ -32,6 +33,8 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 S, E = OrdStatus, EventType
+MARKET_TZ = ZoneInfo("America/New_York")  # ADR-0011：交易日按美东划分
+UNACKED = frozenset({S.PENDING_NEW, S.UNKNOWN})  # ADR-0026：可以挂「待撤」标记的状态
 
 
 class OrderNotFound(MooappError, KeyError):
@@ -136,6 +139,70 @@ class OMS:
     def open_orders(self) -> list[Order]:
         with self._lock:
             return self.store.list_orders(open_only=True)
+
+    # ------------------------------------------------------------------ 给闸门的只读查询（M4）
+
+    def trading_day_bounds(self) -> tuple[datetime, datetime]:
+        """当前美东交易日 [00:00, 次日 00:00) 的 UTC 起止（ADR-0011、0017、0018）。"""
+        today = self.clock.now().astimezone(MARKET_TZ).date()
+        start = datetime.combine(today, time(0), MARKET_TZ)
+        return start, start + timedelta(days=1)
+
+    def orders_sent_today(self) -> int:
+        """ADR-0018：当日（美东）首次 SUBMIT 的订单数，含被券商拒绝的；T55 重发不重复计；闸门拒绝的根本没有建单。"""
+        start, end = self.trading_day_bounds()
+        with self._lock:
+            return self.store.count_submitted_between(start, end)
+
+    def open_leaves(self, symbol: str, side: Side) -> int:
+        """本程序未结束订单的剩余量（M4 确认点 3：持仓上限与可卖数量都算挂单）。"""
+        with self._lock:
+            return sum(o.qty - o.cum_qty for o in self.store.list_orders(open_only=True) if o.symbol == symbol and o.side is side)
+
+    def broker_position(self, symbol: str) -> Position | None:
+        """券商总持仓（ADR-0019：持仓上限按总持仓算，含程序外部分）。vendor § Get Positions。"""
+        for p in self.broker.query_positions():
+            if p.symbol == symbol:
+                return p
+        return None
+
+    def fees_today(self) -> Decimal:
+        """当日订单费用（vendor § Get Order Fee；模拟盘不支持，P7）。只在 REAL 的 daily_pnl 里用。"""
+        start, _ = self.trading_day_bounds()
+        with self._lock:
+            ids = [o.broker_order_id for o in self.store.list_orders() if o.broker_order_id and o.created_at and o.created_at >= start]
+        if not ids:
+            return Decimal(0)
+        return sum(self.broker.query_fees(ids).values(), Decimal(0))
+
+    def daily_pnl(self) -> Decimal | None:
+        """ADR-0017 / M4 确认点 2：券商 today_pl_val 之和（含 qty=0 的行）；实盘再减去当日费用。None = 不可用。"""
+        gross = self.broker.query_today_pnl()
+        if gross is None:
+            return None
+        return gross - self.fees_today() if self.env is Env.REAL else gross
+
+    # ------------------------------------------------------------------ ADR-0026：确认之前的撤单
+
+    def mark_cancel_pending(self, client_order_id: str) -> bool:
+        """给 PENDING_NEW / UNKNOWN 的订单挂「待撤」标记。已挂过返回 False（不重复记录）。"""
+        with self._lock:
+            o = self.get(client_order_id)
+            if o.status not in UNACKED:
+                raise OrderError(f"{client_order_id} 状态 {o.status.value}，不能挂待撤标记（只用于未确认的订单）")
+            if o.cancel_pending:
+                return False
+            o.cancel_pending = True
+            now = self.clock.now()
+            o.updated_at = now
+            rec = EventRecord(
+                o.client_order_id, "CANCEL_DEFERRED", "local", "applied", o.status.value, o.status.value,
+                None, None, None, o.raw_status, "ADR-0026：订单尚未确认，确认后自动撤单", {}, now,
+            )  # fmt: skip
+            with self.store.transaction():
+                self.store.update_order(o)
+                self.store.append_event(rec)
+            return True
 
     # ------------------------------------------------------------------ 本地动作
 
@@ -311,6 +378,8 @@ class OMS:
                 alerts.append(Alert("unexpected_report", f"{ev.type.value} 在 {before.value}：{err}", o.client_order_id, payload))
                 break
             records.append(rec(ev.type.value, "applied" if changed else "ignored", before, o.status, ev))
+            if changed and ev.type is E.CANCEL_REQ:
+                o.cancel_pending = False  # ADR-0026：撤单已发出
             if changed and ev.type is E.FILL:
                 assert ev.exec_id is not None and ev.qty is not None and ev.price is not None and o.broker_order_id
                 fills.append(
@@ -320,6 +389,14 @@ class OMS:
             if changed and o.anomalies:
                 alerts.append(Alert("late_fill", o.anomalies[-1], o.client_order_id))
                 o.anomalies.clear()
+
+        notices: list[object] = []
+        if o.cancel_pending:
+            if o.status in TERMINAL:
+                o.cancel_pending = False
+                records.append(rec("CANCEL_DEFERRED_CLEARED", "applied", o.status, o.status, reason=f"订单在确认前已结束（{o.status.value}），不再撤单"))
+            elif o.status in (S.NEW, S.PARTIALLY_FILLED):
+                notices.append(CancelDue(o.client_order_id))  # Executor 收到后排队发出撤单（不在这里阻塞）
 
         if snap is not None:
             if unmapped:
@@ -339,6 +416,8 @@ class OMS:
                     self.store.append_event(r)
         for a in alerts:
             self.bus.publish(a)
+        for n in notices:
+            self.bus.publish(n)
         return o
 
     # ------------------------------------------------------------------ 启动恢复

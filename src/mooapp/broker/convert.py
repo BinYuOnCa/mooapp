@@ -120,7 +120,22 @@ def position_from_row(row: Mapping[str, Any]) -> Position | None:
         qty=qty,
         can_sell_qty=_qty(_req(row, "can_sell_qty"), "can_sell_qty"),
         avg_cost=_opt_dec(row.get("average_cost"), "average_cost"),
+        today_pl_val=_opt_dec(row.get("today_pl_val"), "today_pl_val"),
     )
+
+
+def today_pnl_from_rows(rows: list[Mapping[str, Any]]) -> Decimal | None:
+    """vendor § Get Positions › today_pl_val 之和，含 qty=0 的行（当天卖光的盈亏，learnings M2：卖光后行仍在）。
+
+    任一行缺失、N/A、NaN → None（不可用），由调用方决定怎么处理（M4：闸门拒绝买单），不猜、不当 0。
+    """
+    total = Decimal(0)
+    for row in rows:
+        v = row.get("today_pl_val")
+        if _is_missing(v):
+            return None
+        total += _dec(v, "today_pl_val")
+    return total
 
 
 def cash_from_row(row: Mapping[str, Any]) -> Cash:

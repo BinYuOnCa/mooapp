@@ -45,3 +45,10 @@ class EventBus:
         for kind, cb in list(self._subs):
             if isinstance(e, kind):
                 cb(e)
+
+
+@dataclass(frozen=True)
+class CancelDue:
+    """ADR-0026：带「待撤」标记的订单已得到确认，请 Executor 发出撤单。处理方必须只排队、不阻塞（发布时 OMS 持有锁）。"""
+
+    client_order_id: str

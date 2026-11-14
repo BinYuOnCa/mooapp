@@ -1,7 +1,7 @@
 # PROGRESS
 
-**当前**：M4 第 1 步（2026-11-14，分支 `dev/milestone_4`）：计划已确认，见下方「M4 计划」。M3 实现已完成，等周一常规时段验收（见「待你处理」）
-**下一步**：M4 写测试，确认失败后停下等你确认；周一开盘先做 M3 验收，再跑探针 P10 和 M4 验收
+**当前**：M4 第 3 步完成（2026-11-14，分支 `dev/milestone_4`）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
+**下一步**（周一常规时段，你用 `!` 运行，各项之间间隔 31 秒）：先做 M3 的事项（见「待你处理」）→ `! uv run mooapp db migrate`（执行 0002）→ 探针 P10 → `pytest -m sim` → M4 验收 `tests/acceptance/test_m4_halt.py` → 结束后 `! uv run mooapp resume`
 
 ## M4 计划（已确认 2026-11-14）
 
@@ -210,6 +210,11 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 5. 结论写进 learnings、PROGRESS；你审 diff、提交、`git tag m1`
 
 ## 待你处理
+
+- [ ] M4（周一）：`! uv run mooapp db migrate`（执行迁移 0002：audit、commands、orders.cancel_pending）
+- [ ] M4（周一常规时段）：`! uv run python scripts/probe_m4_pnl.py`（P10：模拟盘 today_pl_val 是否有效）。无效时闸门会拒绝所有买单，先看 P10 的结果再跑 M4 验收
+- [ ] M4（周一常规时段）：`! uv run pytest -m sim tests/acceptance/test_m4_halt.py`，结束后 `! uv run mooapp resume`（halt 跨重启保留）
+- [ ] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `mooapp.ops.run.build_runtime`（M4 的闸门签名已变，旧写法在 dev/milestone_4 上会失败；你本人修改）
 
 - [ ] M3：确认是否所有 `order_list_query` 都限流（目前只限 refresh=True）
 - [ ] M3：跑探针 P9：`! uv run python scripts/probe_m3_expiry.py`（美东 15:45–16:00），次日 `--check <order_id>`；App 里删一张远离市价的单后再 `--check`

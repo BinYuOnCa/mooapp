@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
@@ -70,6 +70,43 @@ class ReconRecord:
     ts: datetime
 
 
+@dataclass(frozen=True)
+class AuditRecord:
+    """audit 表的一行（只追加）：每次闸门判定、halt、resume（M4）。"""
+
+    ts: datetime
+    action: str  # place / cancel / halt / resume
+    source: str  # Source 的值
+    actor: str
+    client_order_id: str | None
+    symbol: str | None
+    side: str | None
+    qty: int | None
+    price: Decimal | None
+    allowed: bool
+    rule: str | None
+    reason: str
+    details: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CommandRecord:
+    """commands 表的一行（SPEC 3.4）。status：pending → running → done / error。"""
+
+    id: int
+    created_at: datetime
+    kind: str
+    payload: dict[str, Any]
+    actor: str
+    status: str
+    result: dict[str, Any] | None
+    claimed_at: datetime | None
+    finished_at: datetime | None
+
+
+COMMAND_FINAL = frozenset({"done", "error"})
+
+
 def check_event(e: EventRecord) -> None:
     if e.origin not in ORIGINS:
         raise StoreError(f"order_events.origin 必须是 {sorted(ORIGINS)} 之一，收到 {e.origin!r}")
@@ -101,6 +138,17 @@ class Store(Protocol):
     # journal（ADR-0025）
     def mark_journal_applied(self, entry_id: str) -> None: ...
     def is_journal_applied(self, entry_id: str) -> bool: ...
+    # M4：audit（只追加）、当日下单次数、commands、常驻进程单实例锁
+    def append_audit(self, a: AuditRecord) -> None: ...
+    def audit_records(self) -> list[AuditRecord]: ...
+    def count_submitted_between(self, start: datetime, end: datetime) -> int: ...
+    def enqueue_command(self, kind: str, payload: dict[str, Any], actor: str, ts: datetime) -> int: ...
+    def claim_next_command(self, ts: datetime) -> CommandRecord | None: ...
+    def finish_command(self, command_id: int, status: str, result: dict[str, Any], ts: datetime) -> None: ...
+    def get_command(self, command_id: int) -> CommandRecord | None: ...
+    def try_runner_lock(self) -> bool: ...
+    def release_runner_lock(self) -> None: ...
+    def active_rule_for(self, symbol: str) -> str | None: ...  # ADR-0020；M6 之前返回 None
     # 事务
     def transaction(self) -> Any: ...
 
@@ -113,6 +161,8 @@ class _State:
     recon: list[ReconRecord] = field(default_factory=list)
     kv: dict[str, str] = field(default_factory=dict)
     journal: set[str] = field(default_factory=set)
+    audit: list[AuditRecord] = field(default_factory=list)
+    commands: dict[int, CommandRecord] = field(default_factory=dict)
 
 
 class MemoryStore:
@@ -122,6 +172,7 @@ class MemoryStore:
         self._s = _State()
         self._depth = 0
         self._backup: _State | None = None
+        self._runner_locked = False  # 进程内单实例锁（PostgresStore 用 advisory lock）
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -226,3 +277,60 @@ class MemoryStore:
 
     def is_journal_applied(self, entry_id: str) -> bool:
         return entry_id in self._s.journal
+
+    # M4：audit
+
+    def append_audit(self, a: AuditRecord) -> None:
+        self._s.audit.append(copy.deepcopy(a))
+
+    def audit_records(self) -> list[AuditRecord]:
+        return list(self._s.audit)
+
+    # M4：当日下单次数（ADR-0018：已发往券商的新单；RESUBMIT 不重复计；只算生效的 SUBMIT）
+
+    def count_submitted_between(self, start: datetime, end: datetime) -> int:
+        return len(
+            {e.client_order_id for e in self._s.events if e.event_type == "SUBMIT" and e.outcome == "applied" and start <= e.ts < end}
+        )
+
+    # M4：commands（SPEC 3.4）
+
+    def enqueue_command(self, kind: str, payload: dict[str, Any], actor: str, ts: datetime) -> int:
+        cid = max(self._s.commands, default=0) + 1
+        self._s.commands[cid] = CommandRecord(cid, ts, kind, copy.deepcopy(payload), actor, "pending", None, None, None)
+        return cid
+
+    def claim_next_command(self, ts: datetime) -> CommandRecord | None:
+        pending = sorted(i for i, c in self._s.commands.items() if c.status == "pending")
+        if not pending:
+            return None
+        c = replace(self._s.commands[pending[0]], status="running", claimed_at=ts)
+        self._s.commands[c.id] = c
+        return copy.deepcopy(c)
+
+    def finish_command(self, command_id: int, status: str, result: dict[str, Any], ts: datetime) -> None:
+        if status not in COMMAND_FINAL:
+            raise StoreError(f"commands.status 只能结束为 {sorted(COMMAND_FINAL)}，收到 {status!r}")
+        c = self._s.commands.get(command_id)
+        if c is None:
+            raise StoreError(f"commands 没有 {command_id}")
+        self._s.commands[command_id] = replace(c, status=status, result=copy.deepcopy(result), finished_at=ts)
+
+    def get_command(self, command_id: int) -> CommandRecord | None:
+        c = self._s.commands.get(command_id)
+        return copy.deepcopy(c) if c is not None else None
+
+    # M4：常驻进程单实例锁
+
+    def try_runner_lock(self) -> bool:
+        if self._runner_locked:
+            return False
+        self._runner_locked = True
+        return True
+
+    def release_runner_lock(self) -> None:
+        self._runner_locked = False
+
+    # ADR-0020：该标的的活动规则 id。rules 表在 M6 建立（规则状态由 strategy 写入 Store）；之前没有任何规则
+    def active_rule_for(self, symbol: str) -> str | None:
+        return None
