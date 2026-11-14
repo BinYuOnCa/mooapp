@@ -395,3 +395,26 @@ App 里当天模拟账户的 5 张订单与录制一致（你 2026-11-13 核对�
 - **出处**：vendor § Get open Orders、§ Get Historical Orders；`scripts/probe_m3_expiry.py` @ f6104e9（`--check` 模式）
 - **记录**：`recordings/probes/probe_m3_expiry_20261113T230431Z.jsonl`；运行时间 2026-11-13T23:04:31Z（美东 18:04）；SDK 10.12.7208，OpenD 1012
 - **待补**：周一（2026-11-16）美东 16:00 之后对 841874–841883 再跑一次 `--check`，看 DAY 单过期后显示什么状态（DISABLED？CANCELLED_ALL？），有没有推送；周二再查一次，看 24 小时后还能不能查到。之后再定 `mapping.py` 里 DISABLED 的映射。DELETED 需要你在 App 里删一张单再查
+
+## M6a 规则引擎纯逻辑（2026-11-14）
+
+#### 表达式白名单：常量按源码原文转 Decimal
+
+- **结论**：`ast` 解析后，`0.95` 这类小数在语法树里已经是二进制浮点数。直接 `Decimal(0.95)` 会得到 0.9499999999999999555910790149937…。编译器改用 `ast.get_source_segment` 取源码原文再转 `Decimal`，`0.95` 就精确等于 `Decimal("0.95")`
+- **依据**：实现时发现，`test_expr.py::test_float_literals_are_exact_decimals` 固化
+- **影响**：`strategy/expr.py`。规则文件里的限价同理，要求写成字符串（Schema 规定）
+
+#### 「同一时段两边都碰到」只在 K 线回放里出现
+
+- **结论**：逐笔行情一次只有一个价格，止损价又一定低于止盈价，所以不可能同时越过两边。只有用 K 线（时段内的最低价和最高价）回放时才会两边都碰到，而且先后顺序不明。你决定按止盈算（ADR-0027 第 2 条），dry-run 输出里注明了这一点。实时监控（M6b）用逐笔行情，不受影响
+- **影响**：`strategy/machine.py on_bar`；dry-run 的价格文件可以混用 tick 和 bar
+
+#### 首次成交时就冻结价格，avg_cost 等于首次成交价
+
+- **结论**：ADR-0005 规定「首次成交后算一次」，所以计算用的 `avg_cost` 就是首次成交价，之后分批成交使均价变化也不重算（路径 5a：均价变成 99.964，止损价和止盈价仍是 95.00 和 105.22）。只有卖出数量随成交增加（ADR-0008）
+- **影响**：M6b 接 OMS 时，冻结用的是第一笔成交的价格，不是订单的最终均价
+
+#### 终端里的中文对齐要按显示宽度
+
+- **结论**：Python 的格式化补空格是按字符数算的，中文字符在终端里占 2 列，所以列对不齐。dry-run 输出改用 `unicodedata.east_asian_width` 计算显示宽度
+- **影响**：`strategy/dryrun.py format_events`。以后命令行里的中文表格（例如 `order list`）也应这样处理

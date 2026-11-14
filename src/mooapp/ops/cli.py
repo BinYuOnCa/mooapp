@@ -305,3 +305,43 @@ def run(ctx: typer.Context) -> None:
             typer.echo("收到 Ctrl-C，正在退出")
     finally:
         rt.stop()
+
+
+# ------------------------------------------------------------------ M6a：规则文件检查与 dry-run（纯本地，不连 OpenD、不连数据库）
+
+rule_app = typer.Typer(help="止损止盈规则（M6）：check 校验规则文件；dry-run 用价格文件回放。", no_args_is_help=True)
+app.add_typer(rule_app, name="rule")
+
+
+@rule_app.command("check")
+def rule_check(path: Path) -> None:
+    """校验规则文件（YAML + JSON Schema + 表达式白名单），不建规则。"""
+    from mooapp.strategy.spec import RuleSpecError, load_rule_file
+
+    try:
+        spec = load_rule_file(path)
+    except RuleSpecError as e:
+        typer.echo(f"规则不合法：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    typer.echo(
+        f"规则 {spec.id} 合法：{spec.symbol} 限价买 {spec.entry.qty} 股 @{spec.entry.limit_price}；"
+        f"止损 {spec.stop_src}；止盈 {spec.take_src}"
+    )
+
+
+@rule_app.command("dry-run")
+def rule_dry_run(path: Path, prices: Annotated[Path, typer.Option("--prices", help="价格文件 CSV：ts,type,a,b")]) -> None:
+    """用价格文件回放规则，打印何时触发什么（ADR-0005、0007、0008、0009、0027）。"""
+    from mooapp.strategy.dryrun import DryRunError, dry_run, format_events, parse_prices
+    from mooapp.strategy.spec import RuleSpecError, load_rule_file
+
+    try:
+        spec = load_rule_file(path)
+        rows = parse_prices(prices.read_text(encoding="utf-8"))
+    except (RuleSpecError, DryRunError) as e:
+        typer.echo(f"输入不合法：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    except OSError as e:
+        typer.echo(f"读不了价格文件 {prices}：{e.strerror or e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    typer.echo(format_events(dry_run(spec, rows)))

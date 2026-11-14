@@ -1,7 +1,47 @@
 # PROGRESS
 
-**当前**：M4 第 3 步完成（2026-11-14，分支 `dev/milestone_4`）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
+**当前（M6a，分支 `dev/milestone_6`）**：2026-11-14 实现完成，`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
+**M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**（周一常规时段，你用 `!` 运行，各项之间间隔 31 秒）：先做 M3 的事项（见「待你处理」）→ `! uv run mooapp db migrate`（执行 0002）→ 探针 P10 → `pytest -m sim` → M4 验收 `tests/acceptance/test_m4_halt.py` → 结束后 `! uv run mooapp resume`
+
+## M6a 计划（已确认 2026-11-14，分支 `dev/milestone_6`，从 `dev/milestone_4` 拉出）
+
+目标：SPEC 8 节 M6 的验收 1（5 条价格路径与你手算一致）和验收 2（非法表达式在加载时被拒）。只做纯逻辑部分，不需要实时行情和数据库。验收 3（模拟盘一边触发后另一边作废）放到 M6b。M5 跳过，M6 不依赖它。
+
+### 你确认的点
+
+1. K 线时段里两边都碰到时，按止盈算（ADR-0027 第 2 条）
+2. 触发时先撤掉入场单余量，再卖出已成交的数量；撤单前又成交的部分补卖（ADR-0027 第 3 条）
+3. 卖单被拒绝：下一笔行情时同一边条件仍成立就重发；价格回到两个触发价之间就重新监控；累计失败 3 次进入 ERROR（ADR-0027 第 4 条）
+4. 依赖：PyYAML 6.0.3、jsonschema 4.26.0（SPEC Q13 已批准，2026-11-14 安装）
+
+### 设计要点
+
+- 规则文件：YAML 加 JSON Schema，字段为 `id`、`symbol`、`entry{side: BUY, qty, limit_price}`、`stop`、`take`；不允许多余字段，限价用字符串写；加载时编译两个表达式
+- 表达式：基于 `ast` 白名单，不使用 eval；只允许 `open`、`avg_cost`、`last`、`min`、`max`、`round_tick(x, "up"|"down")`、`+ - * /`、负号、数字；全部用 Decimal；长度不超过 200 个字符
+- 取整：复用 `broker/port.py` 的最小变动单位；止损价向上、止盈价向下（ADR-0009）
+- 状态机（纯逻辑，输入事件、输出动作）：PENDING → ARMED → TRIGGERED → CLOSED，另有 VOID、ERROR；首次成交时冻结价格（ADR-0005、0027 第 5 条）；冻结时已越过就立即触发（ADR-0007）；入场单过期按 ADR-0023；halt 期间暂停
+- dry-run：`mooapp rule dry-run <yaml> --prices <csv>`，CSV 列为 `ts,type,a,b`，type 取 `open | fill | tick | bar | reject_next_sell | expire`；卖单默认按触发时看到的价格成交，并打印滑点。另有 `mooapp rule check <yaml>`（只校验）
+
+### 价格路径（入场买 10 股 @100.21，开盘价 99.99，首次成交价 100.21）
+
+- 止损价 = min(99.99, 100.21) × 0.95 = 94.9905，向上取整为 95.00；止盈价 = max(99.99, 100.21) × 1.05 = 105.2205，向下取整为 105.22
+- 1 先止损（tick 99.00 → 95.01 → 95.00）；2 先止盈（103.00 → 105.21 → 105.22）；3 跳空越过止损（98.00 → 92.50，滑点 2.50）；4 一根 K 线两边都碰到（最低 94.00、最高 106.00，按止盈）；5a 分两次成交 4 + 6 股后在 94.80 触发、价格不重算；5b 只成交 4 股时触发：撤余量、卖 4 股，撤单前又成交 2 股则补卖 2 股
+
+### 文件
+
+- 新增：`src/mooapp/strategy/` 下 `expr.py`、`ticks.py`、`spec.py`、`rule.schema.json`、`machine.py`、`dryrun.py`；`docs/adr/0027-rule-engine-semantics.md`；`examples/rules/spy-oco.yaml`、`examples/prices/*.csv`；测试 `test_expr.py`、`test_rule_spec.py`、`test_rule_machine.py`、`test_dryrun.py`
+- 修改：`ops/cli.py`（`rule dry-run`、`rule check`）、`pyproject.toml`、`uv.lock`；收尾时改 learnings 和 PROGRESS
+- 不改：风控限额、`tests/acceptance/`、`.claude/`、闸门和 OMS
+
+### 执行顺序
+
+1. 安装依赖、写 ADR-0027、把计划写进 PROGRESS（已完成）
+2. 写测试，跑一遍确认失败，原样贴出结果；**停下等你确认**
+3. 写实现，直到 `pytest` 通过
+4. `/milestone-git commit 6`
+
+M6b（另行计划）：rules 表与 `active_rule_for`、Moomoo 的 `subscribe_quotes`、把状态机接到闸门、OMS 和 HaltChanged、`rule add` 和 `rule list`、模拟盘验收 3
 
 ## M4 计划（已确认 2026-11-14）
 
