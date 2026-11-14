@@ -105,6 +105,31 @@ class CommandRecord:
 
 
 COMMAND_FINAL = frozenset({"done", "error"})
+RULE_ACTIVE = frozenset({"PENDING", "ARMED", "TRIGGERED"})  # 与 strategy/machine.py ACTIVE_STATUSES 一致
+
+
+@dataclass(frozen=True)
+class RuleRecord:
+    """rules 表的一行（M6b）。state 是状态机快照（JSON）。"""
+
+    id: str
+    symbol: str
+    spec_yaml: str
+    status: str
+    entry_cid: str
+    state: dict[str, Any]
+    actor: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class RuleEventRecord:
+    rule_id: str
+    ts: datetime
+    kind: str
+    message: str
+    details: dict[str, Any]
 
 
 def check_event(e: EventRecord) -> None:
@@ -148,7 +173,17 @@ class Store(Protocol):
     def get_command(self, command_id: int) -> CommandRecord | None: ...
     def try_runner_lock(self) -> bool: ...
     def release_runner_lock(self) -> None: ...
-    def active_rule_for(self, symbol: str) -> str | None: ...  # ADR-0020；M6 之前返回 None
+    def active_rule_for(self, symbol: str) -> str | None: ...  # ADR-0020
+    # M6b：规则
+    def insert_rule(self, r: RuleRecord) -> None: ...
+    def update_rule(self, rule_id: str, status: str, state: dict[str, Any], ts: datetime) -> None: ...
+    def get_rule(self, rule_id: str) -> RuleRecord | None: ...
+    def list_rules(self, active_only: bool = False) -> list[RuleRecord]: ...
+    def link_rule_order(self, client_order_id: str, rule_id: str, role: str, ts: datetime) -> None: ...
+    def rule_order(self, client_order_id: str) -> tuple[str, str] | None: ...
+    def rule_orders(self, rule_id: str) -> list[tuple[str, str]]: ...
+    def append_rule_event(self, e: RuleEventRecord) -> None: ...
+    def rule_events(self, rule_id: str) -> list[RuleEventRecord]: ...
     # 事务
     def transaction(self) -> Any: ...
 
@@ -163,6 +198,9 @@ class _State:
     journal: set[str] = field(default_factory=set)
     audit: list[AuditRecord] = field(default_factory=list)
     commands: dict[int, CommandRecord] = field(default_factory=dict)
+    rules: dict[str, RuleRecord] = field(default_factory=dict)
+    rule_orders: dict[str, tuple[str, str, datetime]] = field(default_factory=dict)
+    rule_events: list[RuleEventRecord] = field(default_factory=list)
 
 
 class MemoryStore:
@@ -331,6 +369,55 @@ class MemoryStore:
     def release_runner_lock(self) -> None:
         self._runner_locked = False
 
-    # ADR-0020：该标的的活动规则 id。rules 表在 M6 建立（规则状态由 strategy 写入 Store）；之前没有任何规则
+    # ------------------------------------------------------------------ M6b：规则
+
     def active_rule_for(self, symbol: str) -> str | None:
+        """ADR-0020：该标的的活动规则 id。"""
+        for r in self._s.rules.values():
+            if r.symbol == symbol and r.status in RULE_ACTIVE:
+                return r.id
         return None
+
+    def insert_rule(self, r: RuleRecord) -> None:
+        if r.id in self._s.rules:
+            raise StoreError(f"rules 主键重复：{r.id}")
+        if r.status in RULE_ACTIVE and self.active_rule_for(r.symbol) is not None:
+            raise StoreError(f"{r.symbol} 已有活动规则（ADR-0020）")
+        self._s.rules[r.id] = copy.deepcopy(r)
+
+    def update_rule(self, rule_id: str, status: str, state: dict[str, Any], ts: datetime) -> None:
+        r = self._s.rules.get(rule_id)
+        if r is None:
+            raise StoreError(f"rules 没有 {rule_id}")
+        self._s.rules[rule_id] = replace(r, status=status, state=copy.deepcopy(state), updated_at=ts)
+
+    def get_rule(self, rule_id: str) -> RuleRecord | None:
+        r = self._s.rules.get(rule_id)
+        return copy.deepcopy(r) if r is not None else None
+
+    def list_rules(self, active_only: bool = False) -> list[RuleRecord]:
+        rs = sorted(self._s.rules.values(), key=lambda r: (r.created_at, r.id))
+        return [copy.deepcopy(r) for r in rs if not active_only or r.status in RULE_ACTIVE]
+
+    def link_rule_order(self, client_order_id: str, rule_id: str, role: str, ts: datetime) -> None:
+        if rule_id not in self._s.rules:
+            raise StoreError(f"rule_orders 外键：rules 没有 {rule_id}")
+        if role not in ("entry", "sell"):
+            raise StoreError(f"rule_orders.role 非法：{role!r}")
+        self._s.rule_orders[client_order_id] = (rule_id, role, ts)
+
+    def rule_order(self, client_order_id: str) -> tuple[str, str] | None:
+        v = self._s.rule_orders.get(client_order_id)
+        return (v[0], v[1]) if v is not None else None
+
+    def rule_orders(self, rule_id: str) -> list[tuple[str, str]]:
+        items = [(cid, v) for cid, v in self._s.rule_orders.items() if v[0] == rule_id]
+        return [(cid, v[1]) for cid, v in sorted(items, key=lambda x: x[1][2])]
+
+    def append_rule_event(self, e: RuleEventRecord) -> None:
+        if e.rule_id not in self._s.rules:
+            raise StoreError(f"rule_events 外键：rules 没有 {e.rule_id}")
+        self._s.rule_events.append(copy.deepcopy(e))
+
+    def rule_events(self, rule_id: str) -> list[RuleEventRecord]:
+        return [copy.deepcopy(e) for e in self._s.rule_events if e.rule_id == rule_id]

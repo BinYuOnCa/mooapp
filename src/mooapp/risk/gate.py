@@ -44,6 +44,7 @@ class Intent:
     client_order_id: str | None = None  # cancel 时必填
     actor: str = ""
     protective: bool = False  # ADR-0021
+    rule_id: str | None = None  # M6b：规则引擎发出的单所属的规则
 
 
 @dataclass(frozen=True)
@@ -251,6 +252,7 @@ class RiskGate:
             orders_sent_today=sent,
             daily_pnl=pnl,
             active_rule=rule_id,
+            rule_id=intent.rule_id,
         )
 
     # ------------------------------------------------------------------ 撤单（ADR-0016、0026）

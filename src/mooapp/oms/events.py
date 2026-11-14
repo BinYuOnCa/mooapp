@@ -9,7 +9,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mooapp.oms.state import Order
 
 log = logging.getLogger("mooapp.alert")
 
@@ -52,3 +55,11 @@ class CancelDue:
     """ADR-0026：带「待撤」标记的订单已得到确认，请 Executor 发出撤单。处理方必须只排队、不阻塞（发布时 OMS 持有锁）。"""
 
     client_order_id: str
+
+
+@dataclass(frozen=True)
+class OrderChanged:
+    """M6b：OMS 处理完一个事件、订单有变化（状态或成交）后发布。order 是处理后的副本。
+    处理方必须只排队、不阻塞（发布时 OMS 持有锁）。规则引擎据此喂成交、结束、被拒。"""
+
+    order: Order

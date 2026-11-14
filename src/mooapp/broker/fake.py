@@ -15,6 +15,7 @@ M3 新增（测试辅助）：
 - seed_order / seed_fill：预置券商端订单或成交，不推送
 - REAL 环境的 fill() 生成非合成的成交 id（D1、D2…），模拟实盘成交推送带 deal_id（vendor § Deals Push Callback）
 - M4：set_today_pnl / query_today_pnl（当日盈亏，None 表示字段无效）
+- M6b：subscribe_quotes / push_quote（报价推送）；snapshot 也记录调用
 """
 
 from __future__ import annotations
@@ -102,6 +103,7 @@ class FakeBroker:
         self._place_failures: deque[tuple[BrokerError, bool]] = deque()
         self._next_deal = 1
         self._today_pnl: Decimal | None = Decimal(0)  # M4：query_today_pnl 的返回值，测试用 set_today_pnl 设置
+        self._quote_cbs: list[tuple[frozenset[str], Callable[[Quote], None]]] = []  # M6b
 
     # ------------------------------------------------------------------ 测试辅助（M3）
 
@@ -367,8 +369,26 @@ class FakeBroker:
 
     # ------------------------------------------------------------------ 行情
 
+    def subscribe_quotes(self, symbols: list[str], cb: Callable[[Quote], None]) -> None:
+        with self._lock:
+            self._record("subscribe_quotes", tuple(symbols))
+            self._quote_cbs.append((frozenset(symbols), cb))
+
+    def push_quote(self, symbol: str, last: Decimal, open: Decimal | None = None) -> Quote:
+        """M6b 测试辅助：推一条报价（同时更新快照），只推给订阅了该标的的回调；回调在锁外调用。"""
+        with self._lock:
+            prev = self._quotes.get(symbol)
+            q = Quote(symbol=symbol, last=last, open=open if open is not None else (prev.open if prev else None),
+                      ts=self._clock.now(), bid=last, ask=last)  # fmt: skip
+            self._quotes[symbol] = q
+            cbs = [cb for syms, cb in self._quote_cbs if symbol in syms]
+        for cb in cbs:
+            cb(q)
+        return q
+
     def snapshot(self, symbols: list[str]) -> list[Quote]:
         with self._lock:
+            self._record("snapshot", tuple(symbols))
             missing = [s for s in symbols if s not in self._quotes]
             if missing:
                 raise BrokerError(f"get_market_snapshot 失败：没有行情 {missing}")

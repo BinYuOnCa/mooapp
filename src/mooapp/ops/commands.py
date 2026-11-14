@@ -3,6 +3,7 @@
 - CommandClient（命令行进程）：不构造闸门、OMS、券商连接；常驻进程心跳过期时直接报错
 - CommandProcessor（常驻进程）：place / cancel / halt / resume 交给 RiskGate；其他 kind、或处理中抛出的异常，
   写回 error 状态和原因、记 ERROR 日志、发 Alert("command_error")，然后继续处理下一条（不吞错，也不让一条坏命令卡住队列）
+- M6b：rule_add（payload 为 YAML 原文）、rule_cancel 交给规则引擎（入场单、卖单、撤单仍经闸门）
 - 下单命令里的 client_order_id 由命令行生成（place_payload），同一条命令重试时沿用，靠 M3 的幂等保证只有 1 张单
 - 本模块不 import oms.executor（SPEC 3.3 规则 2），只调用 RiskGate
 """
@@ -23,7 +24,7 @@ from mooapp.risk.gate import Intent, RiskGate
 
 log = logging.getLogger(__name__)
 HEARTBEAT_KEY = "runner_heartbeat"
-KINDS = frozenset({"place", "cancel", "halt", "resume"})
+KINDS = frozenset({"place", "cancel", "halt", "resume", "rule_add", "rule_cancel"})
 
 
 class RunnerNotRunning(MooappError):
@@ -40,11 +41,12 @@ class CommandTimeout(MooappError):
 class CommandProcessor:
     HEARTBEAT_TTL = 10.0  # 秒；常驻进程每秒写一次
 
-    def __init__(self, gate: RiskGate, store: Store, clock: Clock, bus: EventBus):
+    def __init__(self, gate: RiskGate, store: Store, clock: Clock, bus: EventBus, engine: Any = None):
         self.gate = gate
         self.store = store
         self.clock = clock
         self.bus = bus
+        self.engine = engine  # M6b：strategy.engine.RuleEngine；不 import 具体类型，避免 ops 依赖 strategy 的实现细节
 
     def heartbeat(self) -> None:
         with self.store.transaction():
@@ -87,6 +89,13 @@ class CommandProcessor:
             cid = payload.get("client_order_id")
             d = self.gate.submit(Intent(Source.CLI, "cancel", client_order_id=cid, actor=actor))
             return _decision(d, cid)
+        if kind in ("rule_add", "rule_cancel"):
+            if self.engine is None:
+                raise RuntimeError("规则引擎未启用，不能处理规则命令")
+            if kind == "rule_add":
+                r = self.engine.add(str(payload.get("yaml") or ""), actor=actor)
+                return {"allowed": r.allowed, "rule_id": r.rule_id, "reason": r.reason, "entry_cid": r.entry_cid}
+            return self.engine.cancel(str(payload.get("rule_id")), actor=actor)
         if kind == "halt":
             r = self.gate.halt(str(payload.get("reason") or "手动 halt"), actor=actor)
             return {"halted": True, "cancel_sent": r.cancel_sent, "deferred": r.deferred, "failed": r.failed}

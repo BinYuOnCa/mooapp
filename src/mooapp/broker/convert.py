@@ -159,6 +159,19 @@ def quote_from_row(row: Mapping[str, Any]) -> Quote:
     )
 
 
+def quote_from_push_row(row: Mapping[str, Any]) -> Quote:
+    """vendor § Real-time Quote Callback 的一行（QUOTE 推送）。data_date + data_time 为美东时间（data_time 也可能已带日期）；
+    open_price 为 0 视为缺失（开盘前的取值待探针 P11）。"""
+    t = str(_req(row, "data_time"))
+    stamp = t if len(t) > 8 else f"{_req(row, 'data_date')} {t}"
+    return Quote(
+        symbol=str(_req(row, "code")),
+        last=_dec(_req(row, "last_price"), "last_price"),
+        open=_opt_dec(row.get("open_price"), "open_price", zero_is_none=True),
+        ts=parse_et_time(stamp),
+    )
+
+
 # ------------------------------------------------------------------ 合成成交（M2 计划第 5 点；SPEC Q2；P4：模拟盘没有成交推送和 deal_list_query）
 
 _PRICE_Q = Decimal("0.000001")  # 反推的成交价保留 6 位小数（vendor：dealt_avg_price 无精度限制）

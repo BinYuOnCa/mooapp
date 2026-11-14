@@ -26,6 +26,7 @@ from mooapp.broker.convert import (
     cash_from_row,
     order_from_row,
     position_from_row,
+    quote_from_push_row,
     quote_from_row,
     today_pnl_from_rows,
 )
@@ -78,6 +79,8 @@ class MoomooBroker:
         self._order_cbs: list[Callable[[BrokerOrder], None]] = []
         self._fill_cbs: list[Callable[[BrokerFill], None]] = []
         self._cb_lock = threading.Lock()
+        self._quote_cbs: list[tuple[frozenset[str], Callable[[Quote], None]]] = []  # M6b
+        self._quote_handler_set = False
         self._register_order_handler()
 
     # ------------------------------------------------------------------ 内部
@@ -256,6 +259,47 @@ class MoomooBroker:
         if len(states) != 1:
             raise BrokerError(f"get_market_state 未返回 {symbol} 的唯一结果：{rows}")
         return states[0]
+
+    def subscribe_quotes(self, symbols: list[str], cb: Callable[[Quote], None]) -> None:
+        """M6b。vendor § Subscribe and Unsubscribe：SubType.QUOTE，每只股票占 1 个订阅额度；subscribe_push=True 才会回调。
+        推送在 SDK 线程里到达（vendor § Real-time Quote Callback），回调方只应排队。"""
+        ft = self._ft
+        with self._cb_lock:
+            self._quote_cbs.append((frozenset(symbols), cb))
+        if not self._quote_handler_set:
+            broker = self
+
+            class _QuoteHandler(ft.StockQuoteHandlerBase):
+                def on_recv_rsp(self, rsp_pb: Any) -> Any:
+                    ret, data = super().on_recv_rsp(rsp_pb)
+                    broker._handle_quote_push(ret, data)
+                    return ret, data
+
+            ret = self._quote.set_handler(_QuoteHandler())
+            if ret != ft.RET_OK:
+                raise BrokerError(f"set_handler（报价）失败：ret={ret}")
+            self._quote_handler_set = True
+        ret, err = self._quote.subscribe(list(symbols), [ft.SubType.QUOTE], subscribe_push=True)
+        if ret != ft.RET_OK:
+            raise BrokerError(f"订阅 {symbols} 报价失败：{_one_line(err)}")
+
+    def _handle_quote_push(self, ret: int, data: Any) -> None:
+        try:
+            if ret != self._ft.RET_OK:
+                if self._recorder is not None:
+                    self._recorder.record("quote_error", _one_line(data))
+                raise BrokerError(f"报价推送失败：{_one_line(data)}")
+            for row in data.to_dict("records"):
+                if self._recorder is not None:
+                    self._recorder.record("quote", row)
+                q = quote_from_push_row(row)
+                with self._cb_lock:
+                    cbs = [cb for syms, cb in self._quote_cbs if q.symbol in syms]
+                for cb in cbs:
+                    cb(q)
+        except Exception:
+            log.exception("处理报价推送出错（SDK 只会把异常写进它自己的日志）")
+            raise
 
     def is_trading_day(self, d: date) -> bool:
         # vendor § Get Trading Calendar：返回 list[dict]；只排除周末和节假日，不含临时休市

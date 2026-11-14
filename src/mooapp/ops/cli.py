@@ -309,7 +309,9 @@ def run(ctx: typer.Context) -> None:
 
 # ------------------------------------------------------------------ M6a：规则文件检查与 dry-run（纯本地，不连 OpenD、不连数据库）
 
-rule_app = typer.Typer(help="止损止盈规则（M6）：check 校验规则文件；dry-run 用价格文件回放。", no_args_is_help=True)
+rule_app = typer.Typer(
+    help="止损止盈规则（M6）：check 校验；dry-run 回放；add / cancel 经常驻进程执行；list 只读。", no_args_is_help=True
+)
 app.add_typer(rule_app, name="rule")
 
 
@@ -345,3 +347,62 @@ def rule_dry_run(path: Path, prices: Annotated[Path, typer.Option("--prices", he
         typer.echo(f"读不了价格文件 {prices}：{e.strerror or e}", err=True)
         raise typer.Exit(EXIT_CONFIG) from None
     typer.echo(format_events(dry_run(spec, rows)))
+
+
+@rule_app.command("add")
+def rule_add(ctx: typer.Context, path: Path) -> None:
+    """添加规则：先在本地校验，再写入命令表，由 mooapp run 下入场单并开始监控（M6b）。"""
+    from mooapp.strategy.spec import RuleSpecError, load_rule
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        load_rule(text)
+    except RuleSpecError as e:
+        typer.echo(f"规则不合法：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    except OSError as e:
+        typer.echo(f"读不了规则文件 {path}：{e.strerror or e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    r = _submit(ctx, "rule_add", {"yaml": text})
+    if r.get("allowed"):
+        typer.echo(f"规则 {r['rule_id']} 已添加，入场单 {r['entry_cid']}")
+    else:
+        typer.echo(f"规则未添加：{r.get('reason')}", err=True)
+        raise typer.Exit(EXIT_COMMAND)
+
+
+@rule_app.command("cancel")
+def rule_cancel(ctx: typer.Context, rule_id: str) -> None:
+    """取消规则：撤入场单余量、停止监控；还有持仓时提示不再受保护（M6b 默认做法 3）。"""
+    r = _submit(ctx, "rule_cancel", {"rule_id": rule_id})
+    typer.echo(f"规则 {rule_id}：{r.get('status')}")
+    if r.get("unprotected_qty"):
+        typer.echo(f"注意：持仓 {r['unprotected_qty']} 股不再受止损止盈保护", err=True)
+
+
+@rule_app.command("list")
+def rule_list(ctx: typer.Context, all_: Annotated[bool, typer.Option("--all", help="包含已结束的规则")] = False) -> None:
+    """列出规则（只读，直接读数据库）。"""
+    from mooapp.oms.pg_store import PostgresStore
+
+    env: Env = ctx.obj
+    try:
+        dsn = _dsn(env)
+    except ConfigError as e:
+        typer.echo(f"配置错误：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    other = _SCHEMA[Env.REAL if env is Env.SIMULATE else Env.SIMULATE]
+    store = PostgresStore(dsn, schema=_SCHEMA[env], other_schema=other)
+    try:
+        rules = store.list_rules(active_only=not all_)
+    finally:
+        store.close()
+    if not rules:
+        typer.echo("（没有规则）")
+        return
+    for r in rules:
+        st = r.state
+        typer.echo(
+            f"{r.id:<20} {r.symbol:<8} {r.status:<9} 止损 {st.get('stop_price') or '-':<8} 止盈 {st.get('take_price') or '-':<8} "
+            f"买 {st.get('bought', 0)} 卖 {st.get('sold', 0)}"
+        )

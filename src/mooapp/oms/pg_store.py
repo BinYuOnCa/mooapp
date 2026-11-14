@@ -28,6 +28,8 @@ from mooapp.oms.store import (
     EventRecord,
     FillRecord,
     ReconRecord,
+    RuleEventRecord,
+    RuleRecord,
     StoreError,
     StoreUnavailable,
     check_event,
@@ -43,6 +45,8 @@ _ORDER_COLS = (
 _N_ORDER_COLS = 24
 _AUDIT_COLS = "ts, action, source, actor, client_order_id, symbol, side, qty, price, allowed, rule, reason, details"
 _COMMAND_COLS = "id, created_at, kind, payload, actor, status, result, claimed_at, finished_at"
+_RULE_COLS = "id, symbol, spec_yaml, status, entry_cid, state, actor, created_at, updated_at"
+_RULE_ACTIVE_SQL = "status IN ('PENDING', 'ARMED', 'TRIGGERED')"
 _EVENT_COLS = "client_order_id, event_type, origin, outcome, from_status, to_status, exec_id, qty, price, raw_status, reason, payload, ts"
 _FILL_COLS = "fill_id, client_order_id, broker_order_id, symbol, side, qty, price, ts, synthetic, origin"
 
@@ -337,6 +341,65 @@ class PostgresStore:
         if not r["ok"]:
             raise StoreError("释放单实例锁失败：当前连接没有持有它")
 
-    # ADR-0020：该标的的活动规则 id。rules 表在 M6 建立（规则状态由 strategy 写入 Store）；之前没有任何规则
+    # ------------------------------------------------------------------ M6b：规则
+
     def active_rule_for(self, symbol: str) -> str | None:
-        return None
+        """ADR-0020：该标的的活动规则 id（rules_one_active_per_symbol 唯一索引兜底）。"""
+        r = self._run(lambda c: c.execute(f"SELECT id FROM rules WHERE symbol = %s AND {_RULE_ACTIVE_SQL}", (symbol,)).fetchone())
+        return r["id"] if r else None
+
+    def insert_rule(self, r: RuleRecord) -> None:
+        q = f"INSERT INTO rules ({_RULE_COLS}) VALUES ({', '.join(['%s'] * 9)})"
+        p = (r.id, r.symbol, r.spec_yaml, r.status, r.entry_cid, Jsonb(r.state), r.actor, r.created_at, r.updated_at)
+        self._run(lambda c: c.execute(q, p))
+
+    def update_rule(self, rule_id: str, status: str, state: dict[str, Any], ts: Any) -> None:
+        def go(c: psycopg.Connection[Any]) -> None:
+            cur = c.execute("UPDATE rules SET status = %s, state = %s, updated_at = %s WHERE id = %s", (status, Jsonb(state), ts, rule_id))
+            if cur.rowcount != 1:
+                raise StoreError(f"rules 没有 {rule_id}")
+
+        self._run(go)
+
+    def get_rule(self, rule_id: str) -> RuleRecord | None:
+        r = self._run(lambda c: c.execute(f"SELECT {_RULE_COLS} FROM rules WHERE id = %s", (rule_id,)).fetchone())
+        return RuleRecord(**r) if r else None
+
+    def list_rules(self, active_only: bool = False) -> list[RuleRecord]:
+        where = f"WHERE {_RULE_ACTIVE_SQL}" if active_only else ""
+        rows = self._run(lambda c: c.execute(f"SELECT {_RULE_COLS} FROM rules {where} ORDER BY created_at, id").fetchall())
+        return [RuleRecord(**r) for r in rows]
+
+    def link_rule_order(self, client_order_id: str, rule_id: str, role: str, ts: Any) -> None:
+        self._run(
+            lambda c: c.execute(
+                "INSERT INTO rule_orders (client_order_id, rule_id, role, created_at) VALUES (%s, %s, %s, %s)",
+                (client_order_id, rule_id, role, ts),
+            )
+        )
+
+    def rule_order(self, client_order_id: str) -> tuple[str, str] | None:
+        r = self._run(lambda c: c.execute("SELECT rule_id, role FROM rule_orders WHERE client_order_id = %s", (client_order_id,)).fetchone())
+        return (r["rule_id"], r["role"]) if r else None
+
+    def rule_orders(self, rule_id: str) -> list[tuple[str, str]]:
+        rows = self._run(
+            lambda c: c.execute(
+                "SELECT client_order_id, role FROM rule_orders WHERE rule_id = %s ORDER BY created_at, client_order_id", (rule_id,)
+            ).fetchall()
+        )
+        return [(r["client_order_id"], r["role"]) for r in rows]
+
+    def append_rule_event(self, e: RuleEventRecord) -> None:
+        self._run(
+            lambda c: c.execute(
+                "INSERT INTO rule_events (rule_id, ts, kind, message, details) VALUES (%s, %s, %s, %s, %s)",
+                (e.rule_id, e.ts, e.kind, e.message, Jsonb(e.details)),
+            )
+        )
+
+    def rule_events(self, rule_id: str) -> list[RuleEventRecord]:
+        rows = self._run(
+            lambda c: c.execute("SELECT rule_id, ts, kind, message, details FROM rule_events WHERE rule_id = %s ORDER BY id", (rule_id,)).fetchall()
+        )
+        return [RuleEventRecord(**r) for r in rows]

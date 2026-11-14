@@ -39,7 +39,8 @@ class OrderContext:
     open_sell_leaves: int
     orders_sent_today: int  # ADR-0018
     daily_pnl: Decimal | None  # ADR-0017；None = today_pl_val 不可用
-    active_rule: str | None  # ADR-0020；M6 之前总是 None
+    active_rule: str | None  # ADR-0020：该标的当前的活动规则 id
+    rule_id: str | None = None  # M6b：本单属于哪条规则（规则自己的入场单不被 ADR-0020 拦）
 
 
 @dataclass(frozen=True)
@@ -156,7 +157,12 @@ def can_sell_qty(ctx: OrderContext, lim: RiskLimits, stale: float) -> Verdict | 
 
 
 def active_rule(ctx: OrderContext, lim: RiskLimits, stale: float) -> Verdict | None:
-    if ctx.active_rule is not None and ctx.req.side is Side.BUY and ctx.source in (Source.RULE, Source.AGENT):
+    if (
+        ctx.active_rule is not None
+        and ctx.active_rule != ctx.rule_id
+        and ctx.req.side is Side.BUY
+        and ctx.source in (Source.RULE, Source.AGENT)
+    ):
         return _reject("active_rule", f"{ctx.req.symbol} 已有活动规则 {ctx.active_rule}（ADR-0020）")
     return None
 

@@ -32,6 +32,10 @@ class RuleStatus(StrEnum):
     CLOSED = "CLOSED"
     VOID = "VOID"
     ERROR = "ERROR"
+    CANCELED = "CANCELED"  # M6b：mooapp rule cancel
+
+
+ACTIVE_STATUSES = frozenset({RuleStatus.PENDING, RuleStatus.ARMED, RuleStatus.TRIGGERED})
 
 
 @dataclass(frozen=True)
@@ -52,7 +56,7 @@ class CancelEntry:
 
 @dataclass(frozen=True)
 class RuleNote:
-    kind: str  # awaiting_open / frozen / triggered / bar_both_sides / sell_rejected / closed / void / error / unprotected_fill
+    kind: str  # awaiting_open / frozen / triggered / bar_both_sides / sell_rejected / closed / void / error / unprotected_fill / cancelled
     message: str
 
 
@@ -137,6 +141,8 @@ class RuleMachine:
         )
 
     def on_sell_rejected(self, reason: str) -> list[Action]:
+        if self.status is not RuleStatus.TRIGGERED:
+            return []  # 规则已结束或已取消：迟到的拒单不再处理
         self.failures += 1
         if self.failures >= self.max_sell_attempts:
             self.status = RuleStatus.ERROR
@@ -148,6 +154,46 @@ class RuleMachine:
     def on_sell_filled(self, qty: int, price: Decimal) -> list[Action]:
         self.sold += qty
         return self._maybe_close()
+
+    def cancel(self) -> list[Action]:
+        """M6b：mooapp rule cancel。活动规则才能取消：撤入场单余量、停止监控；还有持仓时提示不再受保护。"""
+        if self.status not in ACTIVE_STATUSES:
+            return []
+        acts: list[Action] = []
+        if not self.entry_done:
+            acts.append(CancelEntry(self.spec.id))
+        self.status = RuleStatus.CANCELED
+        msg = "规则已取消"
+        if self.held > 0:
+            msg += f"；持仓 {self.held} 股不再受止损止盈保护"
+        acts.insert(0, RuleNote("cancelled", msg))
+        return acts
+
+    # ------------------------------------------------------------------ 状态快照（M6b：存进 rules.state，停机重启后恢复）
+
+    _DEC_FIELDS = ("open", "first_fill_price", "stop_price", "take_price", "_last_observed")
+    _PLAIN_FIELDS = ("bought", "sold", "entry_done", "paused", "side", "failures", "retry_pending")
+
+    def to_state(self) -> dict[str, object]:
+        st: dict[str, object] = {"status": self.status.value}
+        for f in self._DEC_FIELDS:
+            v = getattr(self, f)
+            st[f.lstrip("_")] = str(v) if v is not None else None
+        for f in self._PLAIN_FIELDS:
+            st[f] = getattr(self, f)
+        return st
+
+    @classmethod
+    def from_state(cls, spec: RuleSpec, state: dict[str, object], max_sell_attempts: int = 3) -> RuleMachine:
+        m = cls(spec, max_sell_attempts)
+        m.status = RuleStatus(str(state["status"]))
+        for f in cls._DEC_FIELDS:
+            v = state.get(f.lstrip("_"))
+            setattr(m, f, Decimal(str(v)) if v is not None else None)
+        for f in cls._PLAIN_FIELDS:
+            if f in state:
+                setattr(m, f, state[f])
+        return m
 
     def pause(self) -> None:
         """halt 时暂停（ADR-0021）。"""

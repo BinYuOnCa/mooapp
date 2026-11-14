@@ -1,8 +1,49 @@
 # PROGRESS
 
-**当前（M6a，分支 `dev/milestone_6`）**：2026-11-14 实现完成，`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
+**当前（M6b，分支 `dev/milestone_6`）**：2026-11-14 实现完成，`pytest` 713 passed，`pytest -m pg` 42 passed。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
+**M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**（周一常规时段，你用 `!` 运行，各项之间间隔 31 秒）：先做 M3 的事项（见「待你处理」）→ `! uv run mooapp db migrate`（执行 0002）→ 探针 P10 → `pytest -m sim` → M4 验收 `tests/acceptance/test_m4_halt.py` → 结束后 `! uv run mooapp resume`
+
+## M6b 计划（已确认 2026-11-14，分支 `dev/milestone_6`）
+
+目标：SPEC 8 节 M6 验收 3（模拟盘买 1 股，设很窄的止损止盈，观察一边触发后另一边作废）。代码和测试周末用 FakeBroker 加 PostgreSQL 完成；探针 P11 和验收 3 在开盘时由你运行。
+
+### 你确认的点（2026-11-14，包括默认做法 4 条）
+
+1. 只在常规时段判断触发：`market_state` 不是 AFTERNOON 时忽略行情，结果缓存 30 秒。隔夜跳空的情况，开盘后第一笔行情立即触发（ADR-0003、0007）
+2. 停机重启后，规则从数据库恢复并继续监控，不需要重新 `rule add`
+3. 增加 `mooapp rule cancel <id>`：撤入场单余量、停止监控；还有持仓时提示「N 股不再受保护」
+4. 你手动卖掉规则管理的持仓时不额外处理：触发时卖单被闸门以可卖数量不足拒绝，3 次后进入 ERROR 并报警
+
+### 设计要点
+
+- `strategy/engine.py` RuleEngine，跑在事件线程上：
+  - add：检查 ADR-0020 → 写 rules 表（PENDING）→ 经闸门下入场单（来源为规则引擎，带 rule_id）→ 订阅行情
+  - OMS 新发 `OrderChanged` 事件，引擎按 client_order_id 找到规则，把成交、结束、被拒喂给状态机
+  - 卖出经闸门发市价单并带 protective 标记；被拒时调用 `on_sell_rejected`，下一笔行情重试
+  - 每次状态变化写回状态快照和 `rule_events`；halt 时暂停
+- 成交按订单累计量算增量，并记录已计入的数量和金额：推送、恢复补喂重复到达也不会重复计
+- 行情：BrokerPort 补上 `subscribe_quotes`（Moomoo 订阅 `SubType.QUOTE`，vendor § Subscribe、§ Real-time Quote Callback；FakeBroker 加 `push_quote`）；推送只排进事件队列；某个标的超过 `poll_fallback_seconds` 没有推送就用快照补
+- 数据库 `0003_m6.sql`：`rules`、`rule_orders`、只追加的 `rule_events`；`active_rule_for` 返回真实结果
+- 闸门：Intent 增加 `rule_id`，ADR-0020 的检查不拦规则自己的入场单
+- 命令：`rule add <yaml>`（命令行先本地校验，再把 YAML 原文写进命令表）、`rule cancel <id>`、`rule list`（只读）
+- 启动恢复：引擎先从快照恢复规则，再由 OMS 做启动恢复；停机期间的成交经 `OrderChanged` 补喂；重新订阅行情
+- 探针 P11 `scripts/probe_m6_quote.py`：推送频率、`data_time` 的时区、`open_price` 什么时候有值、盘前盘后的 `last_price` 是不是常规时段的价格
+
+### 文件
+
+- 新增：`strategy/engine.py`、`db/migrations/0003_m6.sql`、`scripts/probe_m6_quote.py`；测试 `test_rule_engine.py`、`test_rule_recovery.py`、`test_quote_feed.py`
+- 修改：`strategy/machine.py`（状态快照、CANCELED）、`oms/oms.py`（OrderChanged）、Store 两个实现、broker 层（subscribe_quotes）、`risk/gate.py`、`risk/rules.py`、`ops/commands.py`、`ops/run.py`、`ops/cli.py`；补充 `test_commands`、`test_store_contract`、`test_gate_m4`、`test_rule_machine`、`test_cli_m4`；收尾时改 learnings 和 PROGRESS
+- 不改：风控限额、`tests/acceptance/`、`.claude/`；没有新依赖
+
+### 执行顺序
+
+1. 计划写进 PROGRESS（已完成）
+2. 写测试，跑一遍确认失败，原样贴出结果，同时贴验收 3 的草稿（做法 C）；**停下等你确认**
+3. 写实现，直到 `pytest` 和 `pytest -m pg` 都通过
+4. 开盘时你依次运行：探针 P11 → 验收 3（与其他 sim 测试间隔 31 秒）
+5. `/milestone-git commit 6`
 
 ## M6a 计划（已确认 2026-11-14，分支 `dev/milestone_6`，从 `dev/milestone_4` 拉出）
 
@@ -250,6 +291,10 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 5. 结论写进 learnings、PROGRESS；你审 diff、提交、`git tag m1`
 
 ## 待你处理
+
+- [ ] M6b（开盘后，在 M4 的事项之后，间隔 31 秒）：`! uv run mooapp db migrate`（执行 0003：rules、rule_orders、rule_events）
+- [ ] M6b（常规时段）：`! uv run python scripts/probe_m6_quote.py`（P11：报价推送频率、时区、open_price、盘前盘后的 last_price）；盘前或盘后再跑一次作对照
+- [ ] M6b（常规时段，不处于 halt）：`! uv run pytest -m sim tests/acceptance/test_m6_rule_oco.py`（最长约 10 分钟）
 
 - [ ] M4（周一）：`! uv run mooapp db migrate`（执行迁移 0002：audit、commands、orders.cancel_pending）
 - [ ] M4（周一常规时段）：`! uv run python scripts/probe_m4_pnl.py`（P10：模拟盘 today_pl_val 是否有效）。无效时闸门会拒绝所有买单，先看 P10 的结果再跑 M4 验收
