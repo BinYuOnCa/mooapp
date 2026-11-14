@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, NotSupported, OrderRequest, Position
 from mooapp.clock import Clock
 from mooapp.common import Env, MooappError, Side, Source
-from mooapp.oms.events import Alert, CancelDue, DealPollRequested, EventBus, OrderChanged
+from mooapp.oms.events import Alert, CancelDue, DealPollRequested, EventBus, OmsReady, OrderChanged
 from mooapp.oms.journal import Journal, ReplayReport, replay_journal
 from mooapp.oms.mapping import map_snapshot
 from mooapp.oms.state import TERMINAL, Event, EventType, Order, OrderError, OrdStatus, apply
@@ -487,6 +487,7 @@ class OMS:
             self._recovery = None
         report.finished_at = self.clock.now()
         self.ready = True
+        self.bus.publish(OmsReady())
         log.info("启动恢复完成：检查 %d 张本地未完成订单，差异 %d 条", report.orders_checked, len(report.mismatches))
         return report
 

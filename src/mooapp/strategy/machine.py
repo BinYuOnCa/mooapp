@@ -108,7 +108,7 @@ class RuleMachine:
             self.status = RuleStatus.TRIGGERED
             observed = self._last_observed if self._last_observed is not None else price
             return [self._sell(qty, observed)]
-        if self.status in (RuleStatus.ERROR, RuleStatus.VOID):
+        if self.status in (RuleStatus.ERROR, RuleStatus.VOID, RuleStatus.CANCELED):
             return [RuleNote("unprotected_fill", f"规则处于 {self.status.value}，新成交的 {qty} 股没有止损止盈保护")]
         return []  # ARMED：数量增加，价格不重算（ADR-0005）
 

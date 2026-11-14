@@ -1,9 +1,24 @@
 # PROGRESS
 
-**当前（M6b，分支 `dev/milestone_6`）**：2026-11-14 实现完成，`pytest` 713 passed，`pytest -m pg` 42 passed。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
+**当前（M6b，分支 `dev/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
 **M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**（周一常规时段，你用 `!` 运行，各项之间间隔 31 秒）：先做 M3 的事项（见「待你处理」）→ `! uv run mooapp db migrate`（执行 0002）→ 探针 P10 → `pytest -m sim` → M4 验收 `tests/acceptance/test_m4_halt.py` → 结束后 `! uv run mooapp resume`
+
+## M6b 审查修复（已确认 2026-11-14，分支 `dev/milestone_6`）
+
+`/code-review high` 有 10 条发现，加上附带的 2 条小问题，逐条核实都成立；你选择全部修复。每条先写能复现问题的测试，确认失败后再修：
+
+1. 死锁、事件线程被阻塞：规则引擎不再在事件线程上调用闸门。下单、撤单、时段查询、快照交给专门的动作线程，结果排回事件线程；`rule add` 和 `rule cancel` 在调用方线程上调用闸门
+2. 保护性卖单被撤销或过期（例如被 halt 撤掉）时，按被拒处理：剩余数量在下一笔行情重试
+3. 调用闸门出错时，按卖单失败计入；`rule add` 出错时规则作废，不留下活动规则
+4. 恢复时按闸门当前的 halt 状态，明确设置暂停或恢复
+5. OMS 就绪（`OmsReady` 事件）之前，状态机的动作先排队，就绪后再执行
+6. 同一标的只订阅一次；不再有活动规则、且订阅满 1 分钟的标的退订
+7. 时段缓存跨过美东 9:30 和 16:00 时立即失效；查询失败也缓存几秒
+8. 快照兜底失败时，同一标的 1 分钟内只报警一次
+9. 加载失败的规则在库里标为 ERROR；`rule cancel` 对没加载成功的规则直接把库里标为 CANCELED
+10. `_persist` 改用深拷贝；CANCELED 状态下的入场成交也报警「不受保护」
 
 ## M6b 计划（已确认 2026-11-14，分支 `dev/milestone_6`）
 

@@ -283,6 +283,16 @@ class MoomooBroker:
         if ret != ft.RET_OK:
             raise BrokerError(f"订阅 {symbols} 报价失败：{_one_line(err)}")
 
+    def unsubscribe_quotes(self, symbols: list[str]) -> None:
+        """vendor § Subscribe and Unsubscribe：订阅后至少 1 分钟才能退订（调用方保证）。"""
+        ft = self._ft
+        drop = set(symbols)
+        with self._cb_lock:
+            self._quote_cbs = [(syms - drop, cb) for syms, cb in self._quote_cbs if syms - drop]
+        ret, err = self._quote.unsubscribe(list(symbols), [ft.SubType.QUOTE])
+        if ret != ft.RET_OK:
+            raise BrokerError(f"退订 {symbols} 报价失败：{_one_line(err)}")
+
     def _handle_quote_push(self, ret: int, data: Any) -> None:
         try:
             if ret != self._ft.RET_OK:

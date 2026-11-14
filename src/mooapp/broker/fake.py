@@ -374,6 +374,19 @@ class FakeBroker:
             self._record("subscribe_quotes", tuple(symbols))
             self._quote_cbs.append((frozenset(symbols), cb))
 
+    def unsubscribe_quotes(self, symbols: list[str]) -> None:
+        with self._lock:
+            self._record("unsubscribe_quotes", tuple(symbols))
+            drop = set(symbols)
+            self._quote_cbs = [(syms - drop, cb) for syms, cb in self._quote_cbs if syms - drop]
+
+    def market_state(self, symbol: str) -> str:
+        with self._lock:
+            self._record("market_state", symbol)
+            if symbol not in self._market_states:
+                raise BrokerError(f"get_market_state 未返回 {symbol}")
+            return self._market_states[symbol]
+
     def push_quote(self, symbol: str, last: Decimal, open: Decimal | None = None) -> Quote:
         """M6b 测试辅助：推一条报价（同时更新快照），只推给订阅了该标的的回调；回调在锁外调用。"""
         with self._lock:
@@ -393,12 +406,6 @@ class FakeBroker:
             if missing:
                 raise BrokerError(f"get_market_snapshot 失败：没有行情 {missing}")
             return [self._quotes[s] for s in symbols]
-
-    def market_state(self, symbol: str) -> str:
-        with self._lock:
-            if symbol not in self._market_states:
-                raise BrokerError(f"get_market_state 未返回 {symbol}")
-            return self._market_states[symbol]
 
     def is_trading_day(self, d: date) -> bool:
         with self._lock:

@@ -63,3 +63,8 @@ class OrderChanged:
     处理方必须只排队、不阻塞（发布时 OMS 持有锁）。规则引擎据此喂成交、结束、被拒。"""
 
     order: Order
+
+
+@dataclass(frozen=True)
+class OmsReady:
+    """M6b 审查修复：OMS 启动恢复完成、闸门开始接受新单。规则引擎据此执行恢复期间排队的动作。"""

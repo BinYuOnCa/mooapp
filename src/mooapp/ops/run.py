@@ -69,6 +69,7 @@ class Runtime:
         self._locked = True
         self.pump.start()
         if self.engine is not None:
+            self.engine.start()  # 规则动作线程：闸门调用不在事件线程上（M6b 审查修复 #1）
             self.engine.recover()  # 先恢复规则：OMS 启动恢复产生的 OrderChanged 会补喂停机期间的成交
         self.oms.recover()
         self.poller.start()
@@ -110,6 +111,8 @@ class Runtime:
         if self._thread is not None:
             step("命令线程", lambda: self._thread.join(10.0) if self._thread else None)
         step("轮询", self.poller.stop)
+        if self.engine is not None:
+            step("规则动作线程", self.engine.stop)
         step("事件线程", self.pump.stop)
         step("上锁", self._relock)
         step("券商连接", self.broker.close)
@@ -165,7 +168,7 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
 
         engine = RuleEngine(
             gate=gate, oms=oms, store=jstore, md=broker, bus=bus, clock=clock, pump=pump,  # type: ignore[arg-type]
-            poll_fallback_seconds=float(settings.quote.poll_fallback_seconds),
+            poll_fallback_seconds=float(settings.quote.poll_fallback_seconds), threaded_actions=True,
         )  # fmt: skip
         processor = CommandProcessor(gate=gate, store=jstore, clock=clock, bus=bus, engine=engine)  # type: ignore[arg-type]
 
