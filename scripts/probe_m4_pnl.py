@@ -8,12 +8,16 @@
   trading accounts」，对 today_pl_val 没有说明）
 - P10b：当天买入又全部卖出后，qty=0 的那一行（learnings M2：卖光后行仍在）是否还带当日盈亏
 - P10c：pl_val、pl_val_valid 等相关字段在模拟盘的取值，原样记录供 M7 参考
+- P10d：挂着未成交的卖单时，position_list_query 的 can_sell_qty 是否已扣除这张卖单（M4 审查小问题：
+  闸门的 can_sell 规则是 can_sell_qty − 本程序未完成卖单；若券商已扣除就会重复扣）
 
 副作用（R6），标的 US.SPY（在 [risk.simulate] 白名单内）：
 1. 限价买 1 股，价格 = 卖一价 × 1.002（向上取到 0.01），期望立即成交。需要成交才能产生当日盈亏，
    所以不满足「离最新价 ≥ 10%」，这是本探针的目的
 2. 成交后查持仓（全部标的，不过滤 code）
-3. 市价卖 1 股，恢复原持仓；成交后再查持仓，看 qty=0 的行
+3. 限价卖 1 股，价格 = 最新价 × 1.10（向上取到 0.01），远高于市价、不会成交；等确认后查持仓（with_open_sell），
+   然后撤单并轮询到终态
+4. 市价卖 1 股，恢复原持仓；成交后再查持仓，看 qty=0 的行
 remark 以 probe: 开头；finally 里撤销本次运行所有未到终态的订单并打印结果（R6、R7）。
 非常规时段直接退出、不下单。
 注意限频按账户共用（learnings「M3 › vendor 限频按账户计算」）：不要和 pytest -m sim 同时运行，前后间隔 31 秒。
@@ -42,6 +46,7 @@ PROBE = Path(__file__).stem
 SYMBOL = "US.SPY"
 QTY = 1
 MARKETABLE_FACTOR = Decimal("1.002")
+FAR_SELL_FACTOR = Decimal("1.10")  # P10d：远高于市价的卖单，不会成交
 TICK = Decimal("0.01")  # 美股 ≥ $1 的最小变动单位（vendor § Place Orders › price）
 CONNECT_TIMEOUT = 5.0
 POLL_INTERVAL = 1.0
@@ -331,6 +336,16 @@ class Probe:
             return 1
         time.sleep(SETTLE)
         self.positions("after_buy")
+
+        # P10d：挂一张不会成交的限价卖单，看 can_sell_qty 是否已扣除
+        far_px = float((last * FAR_SELL_FACTOR).quantize(TICK, rounding=ROUND_UP))
+        far = self.place("far_sell", far_px, "SELL", "NORMAL")
+        if far is not None:
+            time.sleep(SETTLE)  # 等券商确认
+            self.query_order(far)
+            self.positions("with_open_sell")
+            self.cancel(far, "far_sell")
+            self.poll_until_terminal(far, "far_sell.cancel", CANCEL_TIMEOUT)
 
         # vendor § Place Orders：市价单 price 可传任意值
         sell = self.place("sell", float(last), "SELL", "MARKET")
