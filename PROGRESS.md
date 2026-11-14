@@ -1,7 +1,48 @@
 # PROGRESS
 
-**当前**：M3 第 3 步完成（2026-11-13）：OMS 核心实现完成，`pytest` 403 passed，`pytest -m pg` 25 passed（Claude 在 sandbox 内运行）。计划见下方「M3 计划」
-**下一步**（第 4 步，你用 `!` 运行）：探针 P9 次日 `--check 841874 841875`；常规时段（周一）跑 `pytest -m sim` 和 `tests/acceptance/test_m3_*.py`。之后写 learnings 的 P9 结论；验收通过后 `/milestone-git finish 3`（合并到 main，tag `accept/milestone_3`）。周末先在 `dev/milestone_4`（从 `dev/milestone_3` 拉出）推进 M4
+**当前**：M4 第 1 步（2026-11-14，分支 `dev/milestone_4`）：计划已确认，见下方「M4 计划」。M3 实现已完成，等周一常规时段验收（见「待你处理」）
+**下一步**：M4 写测试，确认失败后停下等你确认；周一开盘先做 M3 验收，再跑探针 P10 和 M4 验收
+
+## M4 计划（已确认 2026-11-14）
+
+目标：SPEC 8 节 M4 三条验收。第 1、2 条（每条规则「刚好不超限 / 超限」两个测试、防绕过测试）周末用 FakeBroker 和 PostgreSQL 完成；第 3 条（模拟盘挂 3 张单后 halt）周一由你用 `!` 运行。
+
+### 你确认的点
+
+1. PENDING_NEW 时收到的撤单，等确认（ACK，或轮询看到 SUBMITTED）后自动发出；不改状态矩阵，另写 ADR-0026
+2. 当日亏损取券商持仓接口 `today_pl_val` 之和（含当天卖光、qty=0 的行），实盘再减去费用；模拟盘该字段是否有效，周一用探针 P10 实测。确认之前，字段无效时拒绝买单
+3. 持仓上限与可卖数量都把本程序未成交的挂单算进去：买入时券商总持仓 + 未成交买单剩余量 + 本单 ≤ `max_position_qty`；卖出时 `can_sell_qty` − 未成交卖单剩余量 ≥ 本单
+4. 人锁完整流程、限额锁、上锁的代码都写，用假对象测试；但 `open_broker` 和闸门仍拒绝 REAL。「打开 REAL」在 M4 模拟盘验收通过后另行计划，由你在自己的终端里演练
+5. 默认做法 4 条：
+   - 限流器进程内按 (env, acc_id) 共用
+   - 所有 `order_list_query` 都限流（30 秒 10 次）
+   - 常规时段里行情快照早于 `stale_after_seconds` 时，以 `quote_stale` 拒单
+   - 当日下单次数按订单计：当日（美东）首次 SUBMIT 的订单数，T55 重发不重复计
+
+### 设计要点
+
+- 规则顺序：halt → 白名单 → 常规时段（`get_market_state` = AFTERNOON）→ 行情是否过期 → 单笔数量 → 单笔金额（限价 × 数量；市价单用最新价）→ 限价偏离 → 持仓上限（买）/ 可卖数量（卖）→ 当日下单次数 → 当日亏损。另有：
+  - ADR-0020：调用 `Store.active_rule_for`，M6 之前返回 None
+  - ADR-0021：带 protective 标记的卖单只有来源是规则引擎时才被承认，跳过单笔金额与当日次数；其他来源带这个标记一律拒绝并报警
+  - 撤单只检查「订单属于本程序且处于活动状态」（ADR-0016）
+- 审计：每次闸门判定都写进只追加表 `audit`；拒单时发 `RiskRejected` 事件。触及亏损上限时自动 halt（ADR-0017）。库不可用时拒绝新单，撤单和 halt 照常执行，审计先写 journal（ADR-0025）
+- halt：状态存 kv 表（ADR-0022）；撤销本程序全部活动订单，PENDING_NEW 和 UNKNOWN 的打上「待撤」标记；不碰外部订单；REAL 时调用 `lock()`；发 `HaltChanged` 事件。resume 只能在交互终端执行，要求 TTY 加确认码（Q10）
+- commands 表与常驻进程 `mooapp run`（SPEC 3.4）：`mooapp order buy|sell|cancel`、`halt`、`resume` 只写命令并同步等待结果；常驻进程持有 advisory lock，用 LISTEN/NOTIFY 加 1 秒轮询取命令；常驻进程不在时，写命令直接报错
+- 探针 P10 `scripts/probe_m4_pnl.py`：模拟盘 `today_pl_val` 是否有效，卖光后 qty=0 的行是否还带当日盈亏
+
+### 文件
+
+- 新增：`risk/rules.py`、`risk/audit.py`、`ops/run.py`、`ops/commands.py`、`db/migrations/0002_m4.sql`、`docs/adr/0026-cancel-before-ack.md`、`scripts/probe_m4_pnl.py`，以及测试
+- 修改：`risk/gate.py`；`oms/oms.py`、`oms/executor.py`、`oms/state.py`；`broker/port.py`、`broker/convert.py`、`broker/throttle.py`、`broker/fake.py`；`ops/humanlock.py`、`ops/cli.py`；收尾时改 learnings 和 PROGRESS
+- 不改：风控限额数值、`tests/acceptance/`、`.claude/`；没有新依赖
+
+### 执行顺序
+
+1. 写 ADR-0026、探针 P10
+2. 写测试，跑一遍确认全部失败，原样贴出结果，同时贴验收草稿（做法 C）；**停下等你确认**
+3. 写实现，直到 `pytest` 和 `pytest -m pg` 都通过。优先级：闸门规则和 halt → commands 和 run → 人锁代码
+4. 周一：你先跑 M3 验收（间隔 31 秒），再跑探针 P10、`pytest -m sim` 和 M4 验收
+5. 写 learnings 和 PROGRESS，`/milestone-git commit 4`；M3 打 tag 之后，再 `/milestone-git finish 4`
 
 **Git 命名**（2026-11-13 起）：分支 `dev/milestone_N`（合并后保留），tag `accept/milestone_N`（打在 main 的合并提交上）；旧的 m1、m2 tag 与 m2、m3 分支已改成新名字。流程见 `.claude/skills/milestone-git/SKILL.md`（`/milestone-git <start|commit|finish|push|status> <N>`）
 
