@@ -323,6 +323,18 @@ class PostgresStore:
         r = self._run(lambda c: c.execute(f"SELECT {_COMMAND_COLS} FROM commands WHERE id = %s", (command_id,)).fetchone())
         return CommandRecord(**r) if r else None
 
+    def fail_running_commands(self, result: dict[str, Any], ts: Any) -> int:
+        """M4 审查 #7：常驻进程启动时（已持有单实例锁），把上一个进程遗留的 running 命令标为 error。"""
+
+        def go(c: psycopg.Connection[Any]) -> int:
+            cur = c.execute(
+                "UPDATE commands SET status = 'error', result = %s, finished_at = %s WHERE status = 'running'",
+                (Jsonb(result), ts),
+            )
+            return int(cur.rowcount)
+
+        return self._run(go)
+
     # ------------------------------------------------------------------ M4：常驻进程单实例锁（SPEC 3.4：advisory lock，按 schema 区分）
 
     def _lock_key(self) -> str:

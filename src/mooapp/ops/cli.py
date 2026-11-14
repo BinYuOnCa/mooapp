@@ -271,7 +271,25 @@ def resume(ctx: typer.Context) -> None:
     except humanlock.HumanLockError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(EXIT_HUMAN_LOCK) from None
-    _submit(ctx, "resume", {})
+    from datetime import UTC, datetime
+
+    from mooapp.config.loader import load_secrets
+    from mooapp.ops.resume_auth import resume_payload
+
+    try:
+        key = load_secrets(deps.secrets_path).resume_key
+    except ConfigError as e:
+        typer.echo(f"读不到 secrets：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    if key is None or not key.get_secret_value():
+        typer.echo("secrets 里没有 [resume] key（ADR-0029），无法签名 resume", err=True)
+        raise typer.Exit(EXIT_CONFIG)
+    try:
+        raw = bytes.fromhex(key.get_secret_value())
+    except ValueError:
+        typer.echo("[resume] key 不是十六进制字符串", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    _submit(ctx, "resume", resume_payload(raw, datetime.now(UTC)))
     typer.echo("已解除 halt")
 
 

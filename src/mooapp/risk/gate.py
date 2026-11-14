@@ -21,9 +21,9 @@ from typing import Literal
 
 from mooapp.broker.port import BrokerError, MarketDataPort, OrderRequest
 from mooapp.clock import Clock
-from mooapp.common import Env, Side, Source
+from mooapp.common import Env, MooappError, Source
 from mooapp.config.models import RiskLimits
-from mooapp.oms.events import Alert, EventBus
+from mooapp.oms.events import Alert, EventBus, OmsReady
 from mooapp.oms.executor import CANCEL_ACCEPTED, CANCELLABLE, Executor
 from mooapp.oms.oms import OMS, UNACKED
 from mooapp.oms.state import Order
@@ -115,6 +115,8 @@ class RiskGate:
         self.stale_after_seconds = stale_after_seconds
         self._lock = threading.RLock()  # 自动 halt 在 submit 里调用 halt，可重入
         self._halt = self._load_halt()  # ADR-0022：跨重启保留
+        # M4 审查修复 #4：库不可用时的 halt 只在 journal 里；OMS 启动恢复回放 journal 后再读一次
+        bus.subscribe(OmsReady, lambda e: self._reload_halt())
 
     # ------------------------------------------------------------------ halt 状态
 
@@ -126,6 +128,14 @@ class RiskGate:
         if not d.get("halted"):
             return None
         return HaltState(d["reason"], d["actor"], datetime.fromisoformat(d["since"]))
+
+    def _reload_halt(self) -> None:
+        with self._lock:
+            persisted = self._load_halt()
+            if persisted is not None and self._halt is None:
+                self._halt = persisted
+                log.warning("恢复后发现已持久化的 halt（%s），闸门进入 halt", persisted.reason)
+                self._bus.publish(HaltChanged(True, persisted.reason, persisted.actor))
 
     @property
     def halted(self) -> bool:
@@ -206,7 +216,8 @@ class RiskGate:
                     )  # fmt: skip
                 )
         except StoreUnavailable as e:
-            return self._reject("store_unavailable", f"审计写不进数据库，不下新单（ADR-0025）：{e}", intent)
+            # 这条「通过」审计可能已写进 journal，回放后会出现；在拒绝记录里注明它作废
+            return self._reject("store_unavailable", f"审计写不进数据库，不下新单（ADR-0025；上一条 allowed 审计记录作废）：{e}", intent)
         ticket = _issue_ticket("place", req.client_order_id)
         order = self._executor.place(ticket, req, intent.source)
         return Decision(True, None, "ok", order, ticket)
@@ -226,8 +237,7 @@ class RiskGate:
         # 库里的事实：读不到就拒（ADR-0025）
         try:
             sent = self._oms.orders_sent_today()
-            buy_leaves = self._oms.open_leaves(req.symbol, Side.BUY)
-            sell_leaves = self._oms.open_leaves(req.symbol, Side.SELL)
+            buy_leaves, sell_leaves = self._oms.open_leaves_both(req.symbol)  # 只扫一次订单表
             rule_id = self._store.active_rule_for(req.symbol)
         except StoreUnavailable as e:
             return self._reject("store_unavailable", f"读不到当日次数或挂单（ADR-0025），拒绝新单：{e}", intent)
@@ -259,7 +269,10 @@ class RiskGate:
         cid = intent.client_order_id
         if cid is None:
             return self._reject("bad_intent", "撤单缺少 client_order_id", intent)
-        o = self._oms.get_or_none(cid)
+        try:
+            o = self._oms.get_or_none(cid)
+        except StoreUnavailable as e:
+            return self._cancel_degraded(intent, cid, e)
         if o is None or o.status not in CANCEL_ACCEPTED:
             return self._reject("not_own_active_order", f"{cid} 不是本程序的活动订单", intent)
         reason = "ok" if o.status in CANCELLABLE else "订单尚未确认，确认后自动撤单（ADR-0026）"
@@ -271,6 +284,22 @@ class RiskGate:
         order = self._executor.cancel(ticket, cid)
         return Decision(True, None, reason, order, ticket)
 
+    def _broker_own_open(self) -> dict[str, str]:
+        """库不可用时，从券商查本程序（remark 带 client_order_id）的未完成订单：cid → broker_order_id。"""
+        return {o.client_order_id: o.broker_order_id for o in self._oms.broker.query_orders(open_only=True) if o.client_order_id}
+
+    def _cancel_degraded(self, intent: Intent, cid: str, err: Exception) -> Decision:
+        """ADR-0025：库不可用时撤单照常。归属用券商端的 remark 判断。"""
+        own = self._broker_own_open()
+        if cid not in own:
+            return self._reject("not_own_active_order", f"库不可用，券商端也没有 {cid} 的未完成订单", intent)
+        self._bus.publish(Alert("cancel_degraded", f"库不可用（{err}），按券商端订单撤 {cid}", cid))
+        self._audit(action="cancel", source=intent.source.value, actor=intent.actor, allowed=True, rule=None,
+                    reason="库不可用，按券商端订单撤单（ADR-0025）", client_order_id=cid)  # fmt: skip
+        ticket = _issue_ticket("cancel", cid)
+        order = self._executor.cancel(ticket, cid, broker_order_id=own[cid])
+        return Decision(True, None, "库不可用，已直接撤券商端订单（ADR-0025）", order, ticket)
+
     # ------------------------------------------------------------------ halt / resume
 
     def halt(self, reason: str, actor: str, source: Source = Source.CLI) -> HaltReport:
@@ -278,19 +307,27 @@ class RiskGate:
             now = self._clock.now()
             if self._halt is None:
                 self._halt = HaltState(reason, actor, now)
-            self._persist_halt(True, reason, actor, now)
+            h = self._halt
+            self._persist_halt(True, h.reason, h.actor, h.since)  # 第二次 halt 不覆盖第一次的原因（只在上次没写进库时补写）
             self._audit(action="halt", source=source.value, actor=actor, allowed=True, rule=None, reason=reason)
             self._bus.publish(HaltChanged(True, reason, actor))
             log.warning("HALT by %s：%s", actor, reason)
             report = HaltReport()
-            for o in self._oms.open_orders():
-                if o.status in CANCELLABLE or (o.status in UNACKED and not o.cancel_pending):
-                    try:
-                        self._executor.cancel(_issue_ticket("cancel", o.client_order_id), o.client_order_id)
-                    except BrokerError as e:
-                        report.failed[o.client_order_id] = str(e)
-                        continue
-                    (report.cancel_sent if o.status in CANCELLABLE else report.deferred).append(o.client_order_id)
+            try:
+                targets = [(o.client_order_id, None, o.status in CANCELLABLE)
+                           for o in self._oms.open_orders()
+                           if o.status in CANCELLABLE or (o.status in UNACKED and not o.cancel_pending)]  # fmt: skip
+            except StoreUnavailable as e:
+                # ADR-0025 / 审查 #3：库不可用时 halt 照常，挂单改从券商查（只撤 remark 带 client_order_id 的本程序订单）
+                self._bus.publish(Alert("halt_degraded", f"库不可用（{e}），halt 改按券商端挂单撤单"))
+                targets = [(cid, bid, True) for cid, bid in self._broker_own_open().items()]
+            for cid, bid, now_cancel in targets:
+                try:
+                    self._executor.cancel(_issue_ticket("cancel", cid), cid, broker_order_id=bid)
+                except MooappError as e:  # 审查 #1：单张单状态已变（成交、已确认）或券商拒绝都只记失败，继续撤下一张
+                    report.failed[cid] = f"{type(e).__name__}：{e}"
+                    continue
+                (report.cancel_sent if now_cancel else report.deferred).append(cid)
             if report.failed:
                 self._bus.publish(Alert("halt_cancel_failed", f"halt 时 {len(report.failed)} 张单撤单失败：{report.failed}"))
             if self._env is Env.REAL:

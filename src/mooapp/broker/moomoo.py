@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
@@ -78,6 +79,9 @@ class MoomooBroker:
         self._order_cbs: list[Callable[[BrokerOrder], None]] = []
         self._fill_cbs: list[Callable[[BrokerFill], None]] = []
         self._cb_lock = threading.Lock()
+        # 闸门每次下单都要持仓和当日盈亏，两者来自同一个 position_list_query：短时缓存，只查一次（M4 审查小问题）
+        self._pos_lock = threading.Lock()
+        self._pos_cache: tuple[float, list[dict[str, Any]]] | None = None
         self._register_order_handler()
 
     # ------------------------------------------------------------------ 内部
@@ -90,6 +94,25 @@ class MoomooBroker:
 
     def _rows(self, api: str, result: tuple[int, Any]) -> list[dict[str, Any]]:
         return self._ok(api, result).to_dict("records")
+
+    POSITIONS_CACHE_SECONDS = 0.5
+
+    def _position_rows(self) -> list[dict[str, Any]]:
+        # vendor § Get Positions；refresh_cache=False 走 OpenD 缓存
+        with self._pos_lock:
+            now = time.monotonic()
+            if self._pos_cache is not None and now - self._pos_cache[0] < self.POSITIONS_CACHE_SECONDS:
+                return self._pos_cache[1]
+            rows = self._rows(
+                "position_list_query",
+                self._trade.position_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=False),
+            )
+            self._pos_cache = (now, rows)
+            return rows
+
+    def _invalidate_positions(self) -> None:
+        with self._pos_lock:
+            self._pos_cache = None
 
     def _register_order_handler(self) -> None:
         # vendor § Orders Push Callback：继承 TradeOrderHandlerBase，super().on_recv_rsp 解析出 (ret, DataFrame)
@@ -106,6 +129,7 @@ class MoomooBroker:
             raise BrokerError(f"set_handler 失败：ret={ret}")
 
     def _handle_order_push(self, ret: int, data: Any) -> None:
+        self._invalidate_positions()  # 订单有变化（可能成交）：下次重新查持仓
         try:
             if ret != self._ft.RET_OK:
                 if self._recorder is not None:
@@ -132,6 +156,7 @@ class MoomooBroker:
     # ------------------------------------------------------------------ 写
 
     def place_order(self, req: OrderRequest) -> BrokerOrder:
+        self._invalidate_positions()
         ft = self._ft
         # vendor § Place Orders。市价单 price 可传任意值，传 0.0；adjust_limit=0：不让 OpenD 改价（FAQ Q14、ADR-0009）
         rows = self._ok(
@@ -156,6 +181,7 @@ class MoomooBroker:
         return order_from_row(rows[0])
 
     def cancel_order(self, broker_order_id: str) -> None:
+        self._invalidate_positions()
         # vendor § Modify or Cancel Orders：撤单时 qty、price 被忽略，传 0
         self._ok(
             "modify_order(CANCEL)",
@@ -191,19 +217,11 @@ class MoomooBroker:
 
     def query_positions(self) -> list[Position]:
         # vendor § Get Positions
-        rows = self._rows(
-            "position_list_query",
-            self._trade.position_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=False),
-        )
-        return [p for p in (position_from_row(r) for r in rows) if p is not None]
+        return [p for p in (position_from_row(r) for r in self._position_rows()) if p is not None]
 
     def query_today_pnl(self) -> Decimal | None:
         # vendor § Get Positions › today_pl_val；走缓存（只有刷新缓存时才受限频）；全部行，含 qty=0
-        rows = self._rows(
-            "position_list_query",
-            self._trade.position_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=False),
-        )
-        return today_pnl_from_rows(rows)
+        return today_pnl_from_rows(self._position_rows())
 
     def query_cash(self) -> Cash:
         # vendor § Get Account Funds：currency 只对综合账户生效；与 M1 一致显式传 USD

@@ -52,3 +52,8 @@ class CancelDue:
     """ADR-0026：带「待撤」标记的订单已得到确认，请 Executor 发出撤单。处理方必须只排队、不阻塞（发布时 OMS 持有锁）。"""
 
     client_order_id: str
+
+
+@dataclass(frozen=True)
+class OmsReady:
+    """M6b 审查修复：OMS 启动恢复完成、闸门开始接受新单。规则引擎据此执行恢复期间排队的动作。"""
