@@ -298,10 +298,13 @@ M1–M9 验收标准（照抄手册第 5 节）；ADR 没覆盖、需要我决�
 目标：所有写操作只有一条路，且这条路上有闸门。
 
 ```text
-目标：M4 风控闸门。所有下单、改单必须经过 risk/gate.py；写一个测试，检查代码里不存在绕过闸门直接调用 BrokerPort.place_order 的路径。
-规则（数值来自 settings.toml，分 [risk.simulate] 和 [risk.real]）：标的白名单；单笔数量和金额上限；单票持仓上限；当日下单次数上限；当日亏损上限；限价偏离最新价超过 X% 拒单；只允许常规交易时段。
-Kill switch：`mooapp halt` 拒绝一切新单并撤销所有挂单；`mooapp resume` 需要交互确认。
-每次拒单写审计日志，并发出通知事件（M5 接邮件）。
+目标：M4 风控闸门。
+1) 所有下单、改单必须经过 risk/gate.py；
+2) 写一个测试，检查代码里不存在绕过闸门直接调用 BrokerPort.place_order 的路径。
+3) 实现：规则（数值来自 settings.toml，分 [risk.simulate] 和 [risk.real]）：
+    标的白名单；单笔数量和金额上限；单票持仓上限；当日下单次数上限；当日亏损上限；限价偏离最新价超过 X% 拒单；只允许常规交易时段。
+4） Kill switch：`mooapp halt` 拒绝一切新单并撤销所有挂单；`mooapp resume` 需要交互确认。
+5） 每次拒单写审计日志，并发出通知事件（M5 接邮件）。
 先给计划。
 ```
 

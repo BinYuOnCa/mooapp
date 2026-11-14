@@ -296,3 +296,121 @@ def test_migrate_is_idempotent(pg_schema):
         assert migrate(conn, schema, REPO / "db") == []
         n = conn.execute(f'SELECT count(*) FROM "{schema}".schema_migrations').fetchone()[0]
     assert n == len(list((REPO / "db" / "migrations").glob("*.sql")))
+
+
+# ------------------------------------------------------------------ M4：audit、当日下单次数、commands、单实例锁、待撤标记
+
+
+def audit_rec(**kw):
+    from mooapp.oms.store import AuditRecord
+
+    base = dict(
+        ts=T, action="place", source="cli", actor="cli:test", client_order_id=None, symbol="US.SPY", side="BUY", qty=1,
+        price=Decimal("10.00"), allowed=False, rule="whitelist", reason="不在白名单", details={"k": 1},
+    )  # fmt: skip
+    base.update(kw)
+    return AuditRecord(**base)
+
+
+def test_audit_roundtrip(store):
+    with store.transaction():
+        store.append_audit(audit_rec())
+        store.append_audit(audit_rec(allowed=True, rule=None, reason="ok"))
+    recs = store.audit_records()
+    assert [r.allowed for r in recs] == [False, True]
+    assert recs[0].price == Decimal("10.00") and recs[0].details == {"k": 1}
+
+
+def test_count_submitted_between(store):
+    a, b, c = mk_order(), mk_order(), mk_order()
+    with store.transaction():
+        for o in (a, b, c):
+            store.insert_order(o)
+        store.append_event(ev(a.client_order_id, ts=T))
+        store.append_event(ev(a.client_order_id, event_type="RESUBMIT", from_status="UNKNOWN", ts=T + timedelta(seconds=5)))
+        store.append_event(ev(b.client_order_id, ts=T + timedelta(hours=1)))
+        store.append_event(ev(c.client_order_id, ts=T + timedelta(days=1)))  # 次日
+        store.append_event(ev(c.client_order_id, event_type="SUBMIT", outcome="rejected", ts=T))  # 未生效的不算
+    assert store.count_submitted_between(T - timedelta(hours=1), T + timedelta(hours=2)) == 2
+
+
+def test_commands_queue(store):
+    with store.transaction():
+        i1 = store.enqueue_command("place", {"symbol": "US.SPY"}, "cli", T)
+        i2 = store.enqueue_command("halt", {"reason": "x"}, "cli", T)
+    c = store.claim_next_command(T)
+    assert c is not None and c.id == i1 and c.kind == "place" and c.status == "running"
+    with store.transaction():
+        store.finish_command(i1, "done", {"allowed": True}, T)
+    got = store.get_command(i1)
+    assert got.status == "done" and got.result == {"allowed": True}
+    c2 = store.claim_next_command(T)
+    assert c2 is not None and c2.id == i2
+    assert store.claim_next_command(T) is None
+
+
+def test_runner_lock_exclusive_within_store(store):
+    assert store.try_runner_lock() is True
+    store.release_runner_lock()
+    assert store.try_runner_lock() is True
+    store.release_runner_lock()
+
+
+def test_cancel_pending_roundtrip(store):
+    o = mk_order(cancel_pending=True)
+    with store.transaction():
+        store.insert_order(o)
+    assert store.get_order(o.client_order_id).cancel_pending is True
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("stmt", ["UPDATE {s}.audit SET ts = ts", "DELETE FROM {s}.audit", "TRUNCATE {s}.audit"])
+def test_audit_is_append_only(pg_schema, stmt):
+    import psycopg
+
+    from mooapp.oms.pg_store import PostgresStore
+
+    dsn, schema = pg_schema
+    st = PostgresStore(dsn, schema=schema, other_schema="real")
+    with st.transaction():
+        st.append_audit(audit_rec())
+    st.close()
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with pytest.raises(psycopg.Error, match="只追加"):
+            conn.execute(stmt.format(s=schema))
+
+
+@pytest.mark.pg
+def test_runner_lock_exclusive_across_connections(pg_schema):
+    from mooapp.oms.pg_store import PostgresStore
+
+    dsn, schema = pg_schema
+    a = PostgresStore(dsn, schema=schema, other_schema="real")
+    b = PostgresStore(dsn, schema=schema, other_schema="real")
+    try:
+        assert a.try_runner_lock() is True
+        assert b.try_runner_lock() is False  # 第二个常驻进程拿不到（SPEC 3.4 单实例锁）
+        a.release_runner_lock()
+        assert b.try_runner_lock() is True
+    finally:
+        a.close()
+        b.close()
+
+
+@pytest.mark.pg
+def test_claim_skips_rows_locked_by_other_connection(pg_schema):
+    from mooapp.oms.pg_store import PostgresStore
+
+    dsn, schema = pg_schema
+    a = PostgresStore(dsn, schema=schema, other_schema="real")
+    b = PostgresStore(dsn, schema=schema, other_schema="real")
+    try:
+        with a.transaction():
+            i1 = a.enqueue_command("halt", {}, "cli", T)
+            i2 = a.enqueue_command("resume", {}, "cli", T)
+        c1 = a.claim_next_command(T)
+        c2 = b.claim_next_command(T)
+        assert {c1.id, c2.id} == {i1, i2}
+    finally:
+        a.close()
+        b.close()

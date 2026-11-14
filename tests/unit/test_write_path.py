@@ -75,6 +75,53 @@ def test_executor_public_methods_all_require_ticket():
         assert public[name].args.args[1].arg == "ticket", f"{name} 第一个参数必须是 ticket"
 
 
+def method_calls_on(p: Path, methods: set[str], receiver_hint: str) -> list[str]:
+    """形如 <...executor...>.place( / .cancel( 的调用（接收者名字里含 receiver_hint）。"""
+    tree = ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in methods:
+            recv = ast.unparse(node.func.value)
+            if receiver_hint in recv.lower():
+                out.append(f"{p.relative_to(REPO)}:{node.lineno}:{recv}.{node.func.attr}")
+    return out
+
+
+def test_only_gate_calls_executor_write_methods():
+    """M4 验收 2（防绕过）：命令行、常驻进程、规则引擎、Agent 都只能经 RiskGate；src/ 里只有 risk/gate.py 调用 Executor 的 place / cancel。"""
+    bad = []
+    for p in SRC.rglob("*.py"):
+        if p in (GATE, EXECUTOR):
+            continue
+        bad += method_calls_on(p, {"place", "cancel"}, "executor")
+    assert not bad, bad
+    assert method_calls_on(GATE, {"place", "cancel"}, "executor"), "gate 应调用 executor（防止扫描失效）"
+
+
+def test_entry_modules_do_not_import_executor():
+    """SPEC 3.3 规则 2：strategy、agent、ops（命令行与命令处理）不 import oms.executor；ops/run.py 只负责组装，例外。"""
+    allowed = {SRC / "ops" / "run.py"}
+    bad = []
+    for sub in ("strategy", "agent", "ops"):
+        for p in (SRC / sub).rglob("*.py"):
+            if p in allowed:
+                continue
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("oms.executor"):
+                    bad.append(f"{p.relative_to(REPO)}:{node.lineno}")
+                if isinstance(node, ast.Import) and any(a.name.endswith("oms.executor") for a in node.names):
+                    bad.append(f"{p.relative_to(REPO)}:{node.lineno}")
+    assert not bad, bad
+
+
+def test_run_module_never_calls_broker_or_executor_writes():
+    run = SRC / "ops" / "run.py"
+    assert run.exists()
+    assert not calls_named(run, {"place_order", "cancel_order", "modify_order", "unlock_trade"})
+    assert not method_calls_on(run, {"place", "cancel"}, "executor")
+
+
 def _req():
     return OrderRequest(new_client_order_id(), "US.SPY", Side.BUY, 1, OrderKind.LIMIT, Decimal("10"))
 
