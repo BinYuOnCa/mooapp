@@ -143,3 +143,55 @@ def test_bad_payload_rejected_before_gate():
     result = client.wait(c)
     assert result["allowed"] is False and result["rule"] == "bad_intent"
     assert sys.broker.calls("place_order") == []
+
+
+# ------------------------------------------------------------------ M6b：rule_add、rule_cancel
+
+
+RULE_YAML = """\
+id: spy-oco-1
+symbol: US.SPY
+entry: {side: BUY, qty: 10, limit_price: "10.00"}
+stop: "min(open, avg_cost) * 0.95"
+take: "max(open, avg_cost) * 1.05"
+"""
+
+
+def setup_with_engine():
+    from mooapp.strategy.engine import RuleEngine
+
+    sys = make_system()
+    eng = RuleEngine(gate=sys.gate, oms=sys.oms, store=sys.store, md=sys.broker, bus=sys.bus, clock=sys.clock, pump=sys.pump)
+    proc = CommandProcessor(gate=sys.gate, store=sys.store, clock=sys.clock, bus=sys.bus, engine=eng)
+    client = CommandClient(store=sys.store, clock=sys.clock, timeout=10.0, poll_interval=0.5)
+    proc.heartbeat()
+    return sys, eng, proc, client
+
+
+def test_rule_add_and_cancel_commands():
+    sys, eng, proc, client = setup_with_engine()
+    c = client.enqueue("rule_add", {"yaml": RULE_YAML}, actor="cli:test")
+    proc.process_one()
+    r = client.wait(c)
+    assert r["allowed"] is True and r["rule_id"] == "spy-oco-1"
+    assert len(sys.broker.calls("place_order")) == 1
+    c = client.enqueue("rule_cancel", {"rule_id": "spy-oco-1"}, actor="cli:test")
+    proc.process_one()
+    assert client.wait(c)["status"] == "CANCELED"
+
+
+def test_rule_add_invalid_yaml_reported_not_error():
+    sys, eng, proc, client = setup_with_engine()
+    c = client.enqueue("rule_add", {"yaml": RULE_YAML.replace("min(open, avg_cost) * 0.95", "eval('1')")}, actor="cli:test")
+    proc.process_one()
+    r = client.wait(c)
+    assert r["allowed"] is False and "stop" in r["reason"]
+
+
+def test_rule_commands_without_engine_are_errors():
+    sys, proc, client = setup()
+    proc.heartbeat()
+    c = client.enqueue("rule_add", {"yaml": RULE_YAML}, actor="cli:test")
+    proc.process_one()
+    with pytest.raises(RuntimeError, match="规则引擎"):
+        client.wait(c)

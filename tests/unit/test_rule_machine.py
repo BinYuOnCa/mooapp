@@ -245,3 +245,48 @@ def test_quotes_before_fill_do_nothing(method):
     args = (D("10"),) if method == "on_tick" else (D("10"), D("200"))
     assert getattr(m, method)(*args) == []
     assert m.status is RuleStatus.PENDING
+
+
+# ------------------------------------------------------------------ M6b：状态快照（停机重启后恢复）与取消
+
+
+def test_state_roundtrip_preserves_everything():
+    m = armed(qty=4)
+    m.on_tick(D("95.00"))
+    m.on_sell_rejected("测试")
+    st = m.to_state()
+    import json
+
+    json.dumps(st)  # 必须能存进 jsonb
+    m2 = RuleMachine.from_state(spec(), st)
+    assert m2.to_state() == st
+    assert (m2.status, m2.stop_price, m2.take_price, m2.bought, m2.failures, m2.retry_pending) == (
+        RuleStatus.TRIGGERED, STOP, TAKE, 4, 1, True,
+    )  # fmt: skip
+    (s,) = sells(m2.on_tick(D("94.90")))
+    assert s.attempt == 2
+
+
+def test_cancel_pending_rule_cancels_entry():
+    m = RuleMachine(spec())
+    acts = m.cancel()
+    assert m.status is RuleStatus.CANCELED
+    assert any(isinstance(a, CancelEntry) for a in acts)
+    assert notes(acts, "cancelled")
+
+
+def test_cancel_with_position_reports_unprotected():
+    m = armed(qty=4)
+    acts = m.cancel()
+    assert m.status is RuleStatus.CANCELED
+    (n,) = notes(acts, "cancelled")
+    assert "4" in n.message
+    assert m.on_tick(D("90.00")) == []
+
+
+def test_cancel_closed_rule_is_noop():
+    m = armed()
+    acts = m.on_tick(D("95.00"))
+    m.on_sell_filled(10, D("95.00"))
+    assert m.status is RuleStatus.CLOSED
+    assert m.cancel() == [] and m.status is RuleStatus.CLOSED
