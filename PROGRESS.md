@@ -9,7 +9,17 @@
 
 ## M7 计划（已确认 2026-11-16；数据来源按 P13 / P11 / P8 实测定稿；分支 `dev/milestone_7`）
 
-**状态（2026-11-16 晚）**：实现完成，`pytest` 841 passed，`pytest -m pg` 45 passed。新增：`src/mooapp/eod/`（pnl、recon、report、run）、`mooapp eod [--date]`（退出码 0 / EXIT_BREAK=5 / EXIT_CONFIG=2）、迁移 0004（eod_reports，只追加）、`query_positions(refresh)`、`Quote.prev_close`、`close_times`、持仓刷新限流。与计划的小差异：`close_time(d)` 实现为区间版 `close_times(start, end)`（一次日历查询）；`run_eod` 签名改为接收 Store 与 env（不构造 OMS），SPEC 已同步。待你：`mooapp db migrate`（0004）→ 补跑 `mooapp eod --date 2026-11-16`（第一轮实测，不计入验收）→ 验收 2、3 的草稿复制进 `tests/acceptance/`
+**状态（2026-11-16 晚）**：实现完成，`pytest` 841 passed，`pytest -m pg` 45 passed。新增：`src/mooapp/eod/`（pnl、recon、report、run）、`mooapp eod [--date]`（退出码 0 / EXIT_BREAK=5 / EXIT_CONFIG=2）、迁移 0004（eod_reports，只追加）、`query_positions(refresh)`、`Quote.prev_close`、`close_times`、持仓刷新限流。与计划的小差异：`close_time(d)` 实现为区间版 `close_times(start, end)`（一次日历查询）；`run_eod` 签名改为接收 Store 与 env（不构造 OMS），SPEC 已同步。已完成：`mooapp db migrate`（0004）。**第一轮实测（2026-11-16 收盘后，不计入验收）**：`mooapp eod` 无差异；已实现 0.59、买 8 卖 8、持仓 0；用 journal 里的 10 笔成交独立计算，结果一致（+0.12 +0.20 +0.40 −0.04 −0.09）；51 张契约测试直接下的 moo: 订单只报告。待你：验收 2、3 的草稿复制进 `tests/acceptance/`
+
+### M7 验收 3 登记（连续 5 个交易日，每天有成交、零差异；中断从头数）
+
+| # | 交易日 | 盘中成交 | `test_m7_daily_clean.py` | 备注 |
+|---|---|---|---|---|
+| 1 | 2026-11-17 | | | |
+| 2 | 2026-11-18 | | | |
+| 3 | 2026-11-19 | | | |
+| 4 | 2026-11-20 | | | |
+| 5 | 2026-11-23 | | | |
 
 目标：SPEC 8 节 M7 三条验收（构造数据算到分；插假成交出 [BREAK]；模拟盘连续 5 个交易日对账零差异）。
 
