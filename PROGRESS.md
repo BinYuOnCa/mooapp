@@ -32,6 +32,8 @@
 - 第一次运行 `tests/contract/test_gate_can_sell_sim.py` 失败：断言「卖单确认后 10 秒内缓存 can_sell 会扣减」不成立 → 写探针 P12 实测：OpenD 缓存不随下单、撤单自动更新，只有刷新查询才更新（learnings「M4 探针 P12」；ADR-0031 补「实测补充」与已知局限）
 - 改断言后第二次运行 `1 passed`（美东约 14:20）：缓存 qty 2、can_sell 2（未扣）；第 2 张卖单放行；第 3 张被拒，理由 `min(2 − 0, 2 − 2) = 0`。这次是缓存未刷新的情形，验证的是「不卖超」；「已刷新时不重复扣」由 FakeBroker 测试覆盖（`test_can_sell_adr31.py`）
 - 回归第 2 步 `pytest -m sim tests/contract`：17 passed（5 分 33 秒，无限频报错）；P10d/P12 契约打印「qty 1 → 1，can_sell_qty 1 → 1」（缓存未扣，符合 P12）；闸门端到端测试再次通过
+- 回归第 3–7 步（美东约 14:30–14:40，修复分支上）：M3 幂等 `1 passed`；M3 重启恢复 `1 passed`（843601，本地 NEW / 券商 SUBMITTED）；M4 halt `1 passed`；`mooapp resume` 解除；M6 OCO `1 passed`（这次 **stop 触发**，卖单 843612 @740.02；上午是 take 触发，两边都在模拟盘验证过）
+- **计划 1、计划 2 全部完成，回归全部通过**；下一步：合并 `fix/Post_Milestone_3` 进 main
 
 **状态（2026-11-16）**：实现完成，`pytest` 788 passed，`pytest -m pg` 43 passed；规则引擎和常驻进程的线程测试连跑 3 次都通过。新增测试 10 条（实现前 8 条失败；另 2 条闸门测试在旧 FakeBroker 上本来就通过，改了 FakeBroker 后才真正测到 bug）。`test_gate_m4.py::test_sell_counts_open_sell_orders` 测的是未确认卖单，新规则下结论不变，未改写
 
