@@ -61,6 +61,7 @@ class Runtime:
     processor: CommandProcessor
     engine: Any = None  # M6b：strategy.engine.RuleEngine（启动时先恢复规则，再做 OMS 启动恢复）
     listen: Callable[[float], bool] | None = None  # 等待新命令通知，最多等 timeout 秒；None 时只靠轮询
+    notifier: Any = None  # M5：notify.notifier.Notifier（[notify.email] enabled 时）；启动恢复之前开始订阅
     closers: list[Callable[[], None]] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
@@ -73,6 +74,8 @@ class Runtime:
             raise RunnerAlreadyRunning("另一个 mooapp run 正在运行（单实例锁被占用）")
         self._locked = True
         self.pump.start()
+        if self.notifier is not None:
+            self.notifier.start()  # 先订阅：启动恢复期间的报警也进汇总（M5 决定 4）
         if self.engine is not None:
             self.engine.start()  # 规则动作线程：闸门调用不在事件线程上（M6b 审查修复 #1）
             self.engine.recover()  # 先恢复规则：OMS 启动恢复产生的 OrderChanged 会补喂停机期间的成交
@@ -137,6 +140,8 @@ class Runtime:
             step("命令线程", lambda: self._thread.join(10.0) if self._thread else None)
         if self._hb_thread is not None:
             step("心跳线程", lambda: self._hb_thread.join(5.0) if self._hb_thread else None)
+        if self.notifier is not None:
+            step("通知器", self.notifier.stop)  # 未发出的邮件留在 outbox，下次启动补发
         step("轮询", self.poller.stop)
         if self.engine is not None:
             step("规则动作线程", self.engine.stop)
@@ -210,6 +215,7 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
             poll_fallback_seconds=float(settings.quote.poll_fallback_seconds), threaded_actions=True,
         )  # fmt: skip
         processor = CommandProcessor(gate=gate, store=jstore, clock=clock, bus=bus, engine=engine, resume_key=_resume_key())  # type: ignore[arg-type]
+        notifier = _notifier(settings, store, bus, clock, env, broker, oms, gate)
 
         listen_conn = psycopg.connect(dsn, autocommit=True)
         closers.append(listen_conn.close)
@@ -226,7 +232,7 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
         raise
     return Runtime(
         env=env, clock=clock, broker=broker, md=broker, store=store, bus=bus, oms=oms, pump=pump, poller=poller,  # type: ignore[arg-type]
-        executor=executor, gate=gate, processor=processor, engine=engine, listen=listen, closers=closers,
+        executor=executor, gate=gate, processor=processor, engine=engine, listen=listen, closers=closers, notifier=notifier,
     )  # fmt: skip
 
 
@@ -247,3 +253,21 @@ def _resume_key() -> bytes | None:
     except ValueError:
         log.warning("[resume] key 不是十六进制：本进程将拒绝 resume")
         return None
+
+
+def _notifier(settings: Any, store: Any, bus: EventBus, clock: Clock, env: Env, broker: Any, oms: OMS, gate: RiskGate) -> Any:
+    """M5：[notify.email] enabled 时构造通知器。outbox 用数据库本身（store，不经 journal）；
+    每次发送前重新读 secrets 的 [smtp]（ADR-0032）。"""
+    cfg = settings.notify_email
+    if not cfg.enabled:
+        log.info("邮件通知已关闭（settings.toml [notify.email] enabled = false）")
+        return None
+    from mooapp.config.loader import load_secrets
+    from mooapp.notify.mailer import SmtpMailer
+    from mooapp.notify.notifier import Notifier
+
+    return Notifier(
+        bus=bus, store=store, mailer=SmtpMailer(lambda: load_secrets().smtp), cfg=cfg, clock=clock, env=env, md=broker,
+        status=lambda: {"oms_ready": oms.ready, "halted": gate.halted, "opend": "已连接"},
+    )  # fmt: skip
+

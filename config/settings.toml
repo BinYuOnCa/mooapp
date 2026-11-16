@@ -41,7 +41,8 @@ poll_fallback_seconds = 5        # 推送中断时轮询快照的间隔
 enabled = true
 recipients = ["yubin.tamu@gmail.com"]  # 替换为你的收件地址
 merge_partial_fills_seconds = 60   # 部分成交在此时间窗内合并为一封
-heartbeat_minutes_before_open = 30 # 开盘前多少分钟发「系统正常」心跳
+heartbeat_minutes_before_open = 15 # 开盘前多少分钟发「系统正常」心跳（5–25，即美东 9:05–9:25；M5 决定 5）
+alert_digest_minutes = 30          # 普通报警每多少分钟汇总一封（15–120；M5 决定 4）
 
 # ---------------------------------------------------------------- Agent（M8）
 [agent]

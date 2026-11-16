@@ -25,6 +25,7 @@ from mooapp.oms.store import (
     COMMAND_FINAL,
     AuditRecord,
     CommandRecord,
+    OutboxRecord,
     EventRecord,
     FillRecord,
     ReconRecord,
@@ -36,6 +37,7 @@ from mooapp.oms.store import (
 )
 
 T = TypeVar("T")
+_OUTBOX_COLS = "id, created_at, kind, subject, body, recipients, status, attempts, next_attempt_at, last_error, sent_at"
 
 _ORDER_COLS = (
     "client_order_id, broker_order_id, source, symbol, side, kind, qty, limit_price, cl_ord_id, status, base_status,"
@@ -239,6 +241,42 @@ class PostgresStore:
     def recon_events(self) -> list[ReconRecord]:
         rows = self._run(lambda c: c.execute("SELECT kind, details, client_order_id, ts FROM recon_events ORDER BY id").fetchall())
         return [ReconRecord(r["kind"], r["details"], r["client_order_id"], r["ts"]) for r in rows]
+
+    # ------------------------------------------------------------------ M5：outbox
+
+    def enqueue_email(self, kind: str, subject: str, body: str, recipients: list[str], ts: Any) -> int:
+        r = self._run(
+            lambda c: c.execute(
+                "INSERT INTO outbox (created_at, kind, subject, body, recipients, next_attempt_at) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+                (ts, kind, subject, body, Jsonb(list(recipients)), ts),
+            ).fetchone()
+        )
+        return int(r["id"])
+
+    def due_emails(self, now: Any) -> list[OutboxRecord]:
+        rows = self._run(
+            lambda c: c.execute(
+                f"SELECT {_OUTBOX_COLS} FROM outbox WHERE status = 'pending' AND next_attempt_at <= %s ORDER BY id", (now,)
+            ).fetchall()
+        )
+        return [OutboxRecord(**r) for r in rows]
+
+    def mark_email_sent(self, email_id: int, ts: Any) -> None:
+        self._update_outbox(email_id, "UPDATE outbox SET status = 'sent', attempts = attempts + 1, sent_at = %s WHERE id = %s", (ts, email_id))
+
+    def mark_email_failed(self, email_id: int, error: str, next_attempt_at: Any, ts: Any) -> None:
+        self._update_outbox(
+            email_id,
+            "UPDATE outbox SET attempts = attempts + 1, last_error = %s, next_attempt_at = %s WHERE id = %s",
+            (error, next_attempt_at, email_id),
+        )
+
+    def _update_outbox(self, email_id: int, q: str, params: tuple[Any, ...]) -> None:
+        def go(c: psycopg.Connection[Any]) -> None:
+            if c.execute(q, params).rowcount != 1:
+                raise StoreError(f"outbox 没有 {email_id}")
+
+        self._run(go)
 
     # ------------------------------------------------------------------ kv
 
