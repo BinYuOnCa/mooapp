@@ -597,3 +597,19 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
 - **依据**：`tests/unit/test_risk_rules.py`（ADR-0031 一节，五种情形各「刚好够卖 / 多一股」）、`tests/unit/test_can_sell_adr31.py`；实现前 8 条失败
 - **教训**：FakeBroker 原来的 `can_sell_qty` 恒等于 `qty`，和真实券商不一样，正好掩盖了重复扣减。闸门那条回归测试（`test_gate_allows_selling_rest_after_acked_sell`）在旧 FakeBroker 上能通过；把 FakeBroker 按 P10d 改成扣已确认卖单之后，它才真正测到了 bug。**测试替身的行为要按实测校准**，否则测试通过并不说明代码正确
 - **影响**：`risk/rules.py`（`OrderContext.open_sell_unacked`）、`oms/oms.py`（`open_leaves_summary` 取代 `open_leaves_both`，仍只扫一次）、`risk/gate.py`、`broker/fake.py`
+
+## M4 探针 P12：OpenD 缓存的持仓不随下单、撤单自动更新（2026-11-16）
+
+#### `refresh_cache=False` 的 can_sell_qty 只在成交或刷新查询后更新（P12）
+
+- **结论**：
+  - 卖单 843445 确认后，缓存查询（`refresh_cache=False`）的 `can_sell_qty` 仍是 1，没有扣；第一次刷新查询（`refresh_cache=True`）返回 0，**此后**缓存查询也一直是 0（60 秒）。撤单后缓存仍是 0，直到下一次刷新查询返回 1，之后缓存才是 1
+  - 买入成交 3 秒后，缓存查询已经是 qty 1、can_sell 1：成交会立即更新缓存
+  - 结合下午闸门模拟盘测试（卖单确认 10 秒后缓存仍未扣）：缓存不会因为下单、撤单自动更新，只有刷新查询会把它更新
+- **依据**：实测（2026-11-16 美东 14:03–14:05，常规时段）
+- **出处**：vendor § Get Positions（`refresh_cache`：缓存与刷新，文档未说明缓存何时更新）；`scripts/probe_m4_can_sell_cache.py` @ 2e31fe6（运行时探针文件尚未提交）
+- **记录**：`recordings/probes/probe_m4_can_sell_cache_20261116T190324Z.jsonl`；运行时间 2026-11-16T19:03:24Z；SDK 10.12.7208，OpenD 1012
+- **影响**：
+  - 闸门读到的 `can_sell_qty` 是否已扣挂单，取决于最近有没有人做过刷新查询；ADR-0031 的两项取小在两种情况下都正确（ADR-0031 已补「实测补充」）
+  - P10d 的契约测试改为接受两种结果（已扣 / 未扣），只锁定 qty 不变、can_sell 不会多出来
+  - 已知局限（写进 ADR-0031）：缓存未刷新时，App 里新挂的卖单闸门看不到；是否在卖出前刷新查询，以后另行决定
