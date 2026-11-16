@@ -14,6 +14,20 @@
 
 **状态（2026-11-16 晚）**：实现完成，`pytest` 840 passed，`pytest -m pg` 44 passed；通知器与常驻进程的线程测试连跑 3 次通过。新增 `src/mooapp/notify/`（mailer、compose、notifier）、迁移 `0005_m5.sql`（outbox）、`EmailCfg.alert_digest_minutes`；`settings.toml` 心跳改为 15 分钟、汇总 30 分钟；`tests/conftest.py` 的测试配置同步改为 15。待你：在 M5 目录 `uv run mooapp db migrate`（0005）→ 验收 1–3 的草稿复制进 `tests/acceptance/`
 
+### M5 验收登记
+
+- [ ] 验收 1（SMTP 密码错 → 交易照常 → 改正后补发）：周二盘中，`test_m5_smtp_wrong_password.py` 先 `-k step1`（密码改错）再 `-k step2`（改回）
+- [ ] 验收 2（5 次部分成交 → 1 封）：`test_m5_partial_fills_one_email.py`，任何时段，邮箱核对
+- [ ] 验收 3（连续 3 个交易日心跳）：每天 9:00 前在 M5 目录启动 `mooapp run`，9:35 左右 Ctrl-C 让出单实例锁给主目录的 M6 验收；第 3 天 9:30 后跑 `test_m5_heartbeat_3days.py`
+
+| 交易日 | 心跳收到（时刻） | 备注 |
+|---|---|---|
+| 2026-11-18 | | |
+| 2026-11-19 | | |
+| 2026-11-20 | | |
+
+另：停止常驻进程时，未到时间的汇总与合并窗口写进 outbox（2026-11-16 修复，5915166），下次启动补发
+
 ### 你的决定（2026-11-16）
 
 1. 常驻进程与 `mooapp eod` 读 secrets 的 `[smtp]` 段：ADR-0032（扩展 ADR-0029 的例外）
