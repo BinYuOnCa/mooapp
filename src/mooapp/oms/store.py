@@ -10,7 +10,7 @@ import copy
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -90,6 +90,19 @@ class AuditRecord:
 
 
 @dataclass(frozen=True)
+class EodRecord:
+    """eod_reports 的一行（M7 决定 4；只追加，同一交易日可多次运行）。金额已按报告口径格式化为字符串。"""
+
+    trade_date: date
+    generated_at: datetime
+    env: str
+    ok: bool
+    summary: dict[str, Any]
+    breaks: list[dict[str, Any]]
+    rows: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class CommandRecord:
     """commands 表的一行（SPEC 3.4）。status：pending → running → done / error。"""
 
@@ -154,6 +167,10 @@ class Store(Protocol):
     def get_fill(self, fill_id: str) -> FillRecord | None: ...
     def fills_for(self, client_order_id: str) -> list[FillRecord]: ...
     def net_fill_qty_by_symbol(self) -> dict[str, int]: ...
+    def fills_until(self, end: datetime) -> list[FillRecord]: ...  # M7：ts < end 的全部成交，按 (ts, fill_id) 排序
+    # M7：eod_reports（只追加）
+    def append_eod_report(self, r: EodRecord) -> None: ...
+    def eod_reports(self, trade_date: date) -> list[EodRecord]: ...
     # recon_events（只追加）
     def append_recon(self, kind: str, details: dict[str, Any], client_order_id: str | None, ts: datetime) -> None: ...
     def recon_events(self) -> list[ReconRecord]: ...
@@ -202,6 +219,7 @@ class _State:
     rules: dict[str, RuleRecord] = field(default_factory=dict)
     rule_orders: dict[str, tuple[str, str, datetime]] = field(default_factory=dict)
     rule_events: list[RuleEventRecord] = field(default_factory=list)
+    eod: list[EodRecord] = field(default_factory=list)
 
 
 class MemoryStore:
@@ -300,6 +318,15 @@ class MemoryStore:
 
     def recon_events(self) -> list[ReconRecord]:
         return list(self._s.recon)
+
+    def fills_until(self, end: datetime) -> list[FillRecord]:
+        return sorted((f for f in self._s.fills.values() if f.ts < end), key=lambda f: (f.ts, f.fill_id))
+
+    def append_eod_report(self, r: EodRecord) -> None:
+        self._s.eod.append(copy.deepcopy(r))
+
+    def eod_reports(self, trade_date: date) -> list[EodRecord]:
+        return [copy.deepcopy(r) for r in self._s.eod if r.trade_date == trade_date]
 
     # kv
 

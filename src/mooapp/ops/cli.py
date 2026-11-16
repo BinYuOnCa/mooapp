@@ -434,3 +434,72 @@ def rule_list(ctx: typer.Context, all_: Annotated[bool, typer.Option("--all", he
             f"{r.id:<20} {r.symbol:<8} {r.status:<9} 止损 {st.get('stop_price') or '-':<8} 止盈 {st.get('take_price') or '-':<8} "
             f"买 {st.get('bought', 0)} 卖 {st.get('sold', 0)}"
         )
+
+
+# ------------------------------------------------------------------ M7：收盘 P&L 与对账（只读；PROGRESS「M7 计划」）
+
+EXIT_BREAK = 5
+REPORTS_DIR = Path("reports")  # 已被 .gitignore 忽略（Q15）
+
+
+def _eod_runtime(env: Env):  # type: ignore[no-untyped-def]
+    """M7 决定 1：命令行进程直接连库、连 OpenD 做只读查询，不经常驻进程和闸门。返回 (store, broker, clock, closers)。"""
+    from mooapp.broker.moomoo import open_broker
+    from mooapp.clock import SystemClock
+    from mooapp.oms.pg_store import PostgresStore
+
+    other = _SCHEMA[Env.REAL if env is Env.SIMULATE else Env.SIMULATE]
+    store = PostgresStore(_dsn(env), schema=_SCHEMA[env], other_schema=other)
+    clock = SystemClock()
+    try:
+        broker = open_broker(env, load_broker_cfg(deps.config_dir / "broker.toml"), clock)
+    except BaseException:
+        store.close()
+        raise
+    return store, broker, clock, [broker.close, store.close]
+
+
+@app.command()
+def eod(
+    ctx: typer.Context,
+    date_: Annotated[str | None, typer.Option("--date", help="交易日 YYYY-MM-DD（美东）；默认今天，只支持最近两个已完成的交易日")] = None,
+) -> None:
+    """收盘 P&L 与三方对账：收盘后 30 分钟起运行；写 reports/YYYY-MM-DD.csv 和 eod_reports；有差异时退出码非 0。"""
+    from datetime import date as _date
+
+    from mooapp.broker.port import BrokerError
+    from mooapp.eod.report import render_text, write_csv
+    from mooapp.eod.run import EodError, run_eod, save_report
+
+    env: Env = ctx.obj
+    try:
+        requested = _date.fromisoformat(date_) if date_ else None
+    except ValueError:
+        typer.echo(f"日期格式不对：{date_!r}（应为 YYYY-MM-DD）", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    try:
+        store, broker, clock, closers = _eod_runtime(env)
+    except (ConfigError, BrokerError) as e:
+        typer.echo(f"无法连接：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    try:
+        try:
+            report = run_eod(requested, store=store, broker=broker, md=broker, clock=clock, env=env)
+        except EodError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(EXIT_CONFIG) from None
+        path = write_csv(report, REPORTS_DIR)
+        save_report(store, report)
+        typer.echo(render_text(report))
+        typer.echo(f"报告：{path}")
+    finally:
+        first: BaseException | None = None
+        for c in closers:
+            try:
+                c()
+            except BaseException as e:  # 关闭出错也要把其余连接关掉；最后原样抛出第一个错误（不吞）
+                first = first or e
+        if first is not None:
+            raise first
+    if not report.ok:
+        raise typer.Exit(EXIT_BREAK)

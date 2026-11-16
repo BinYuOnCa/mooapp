@@ -16,7 +16,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 
 from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, Cash, OrderRequest, Position, Quote, RateLimited
@@ -39,7 +39,9 @@ CANCEL_RULE = RateRule("modify_order", max_calls=20, window=30.0, min_interval=0
 QUERY_ORDERS_RULE = RateRule("order_list_query", max_calls=10, window=30.0, min_interval=0.0, margin=1.0)
 # vendor § Get Historical Orders › Interface Limitations：每个 acc_id 30 秒 10 次（与 order_list_query 分开计）
 HISTORY_ORDERS_RULE = RateRule("history_order_list_query", max_calls=10, window=30.0, min_interval=0.0, margin=1.0)
-_RULES = (PLACE_RULE, CANCEL_RULE, QUERY_ORDERS_RULE, HISTORY_ORDERS_RULE)
+# vendor § Get Positions：只有刷新缓存（refresh_cache=True）时受限频，每个 acc_id 30 秒 10 次（M7）
+POSITIONS_REFRESH_RULE = RateRule("position_list_query_refresh", max_calls=10, window=30.0, min_interval=0.0, margin=1.0)
+_RULES = (PLACE_RULE, CANCEL_RULE, QUERY_ORDERS_RULE, HISTORY_ORDERS_RULE, POSITIONS_REFRESH_RULE)
 
 DEFAULT_MAX_WAIT = 60.0
 
@@ -120,6 +122,7 @@ class ThrottledBroker:
         self._cancel = throttles[CANCEL_RULE.name]
         self._query_orders = throttles[QUERY_ORDERS_RULE.name]
         self._query_history = throttles[HISTORY_ORDERS_RULE.name]
+        self._positions_refresh = throttles[POSITIONS_REFRESH_RULE.name]
 
     @property
     def env(self) -> Env:
@@ -149,8 +152,10 @@ class ThrottledBroker:
     def query_fees(self, broker_order_ids: list[str]) -> dict[str, Decimal]:
         return self.inner.query_fees(broker_order_ids)
 
-    def query_positions(self) -> list[Position]:
-        return self.inner.query_positions()
+    def query_positions(self, refresh: bool = False) -> list[Position]:
+        if refresh:
+            self._positions_refresh.acquire()
+        return self.inner.query_positions(refresh=refresh)
 
     def query_today_pnl(self) -> Decimal | None:
         return self.inner.query_today_pnl()
@@ -184,6 +189,9 @@ class ThrottledBroker:
 
     def is_trading_day(self, d: date) -> bool:
         return self.inner.is_trading_day(d)  # type: ignore[attr-defined]
+
+    def close_times(self, start: date, end: date) -> dict[date, time]:
+        return self.inner.close_times(start, end)  # type: ignore[attr-defined]
 
     def subscribe_quotes(self, symbols: list[str], cb: Callable[[Quote], None]) -> None:
         self.inner.subscribe_quotes(symbols, cb)  # type: ignore[attr-defined]

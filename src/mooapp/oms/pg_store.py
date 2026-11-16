@@ -25,6 +25,7 @@ from mooapp.oms.store import (
     COMMAND_FINAL,
     AuditRecord,
     CommandRecord,
+    EodRecord,
     EventRecord,
     FillRecord,
     ReconRecord,
@@ -235,6 +236,27 @@ class PostgresStore:
                 (kind, client_order_id, Jsonb(details), ts),
             )
         )
+
+    def fills_until(self, end: Any) -> list[FillRecord]:
+        rows = self._run(lambda c: c.execute(f"SELECT {_FILL_COLS} FROM fills WHERE ts < %s ORDER BY ts, fill_id", (end,)).fetchall())
+        return [_fill_from(r) for r in rows]
+
+    def append_eod_report(self, r: EodRecord) -> None:
+        self._run(
+            lambda c: c.execute(
+                "INSERT INTO eod_reports (trade_date, generated_at, env, ok, summary, breaks, rows) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (r.trade_date, r.generated_at, r.env, r.ok, Jsonb(r.summary), Jsonb(r.breaks), Jsonb(r.rows)),
+            )
+        )
+
+    def eod_reports(self, trade_date: Any) -> list[EodRecord]:
+        rows = self._run(
+            lambda c: c.execute(
+                "SELECT trade_date, generated_at, env, ok, summary, breaks, rows FROM eod_reports WHERE trade_date = %s ORDER BY id",
+                (trade_date,),
+            ).fetchall()
+        )
+        return [EodRecord(r["trade_date"], r["generated_at"], r["env"], r["ok"], r["summary"], r["breaks"], r["rows"]) for r in rows]
 
     def recon_events(self) -> list[ReconRecord]:
         rows = self._run(lambda c: c.execute("SELECT kind, details, client_order_id, ts FROM recon_events ORDER BY id").fetchall())

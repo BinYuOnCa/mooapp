@@ -163,6 +163,7 @@ def quote_from_row(row: Mapping[str, Any]) -> Quote:
         ts=parse_et_time(_req(row, "update_time")),
         bid=_opt_dec(row.get("bid_price"), "bid_price", zero_is_none=True),
         ask=_opt_dec(row.get("ask_price"), "ask_price", zero_is_none=True),
+        prev_close=_opt_dec(row.get("prev_close_price"), "prev_close_price", zero_is_none=True),
     )
 
 

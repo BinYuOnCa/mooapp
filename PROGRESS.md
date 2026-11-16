@@ -7,7 +7,9 @@
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
 
-## M7 计划（决定已确认 2026-11-16；数据来源按 P13 / P11 / P8 实测定稿，待你确认；分支 `dev/milestone_7`）
+## M7 计划（已确认 2026-11-16；数据来源按 P13 / P11 / P8 实测定稿；分支 `dev/milestone_7`）
+
+**状态（2026-11-16 晚）**：实现完成，`pytest` 841 passed，`pytest -m pg` 45 passed。新增：`src/mooapp/eod/`（pnl、recon、report、run）、`mooapp eod [--date]`（退出码 0 / EXIT_BREAK=5 / EXIT_CONFIG=2）、迁移 0004（eod_reports，只追加）、`query_positions(refresh)`、`Quote.prev_close`、`close_times`、持仓刷新限流。与计划的小差异：`close_time(d)` 实现为区间版 `close_times(start, end)`（一次日历查询）；`run_eod` 签名改为接收 Store 与 env（不构造 OMS），SPEC 已同步。待你：`mooapp db migrate`（0004）→ 补跑 `mooapp eod --date 2026-11-16`（第一轮实测，不计入验收）→ 验收 2、3 的草稿复制进 `tests/acceptance/`
 
 目标：SPEC 8 节 M7 三条验收（构造数据算到分；插假成交出 [BREAK]；模拟盘连续 5 个交易日对账零差异）。
 
