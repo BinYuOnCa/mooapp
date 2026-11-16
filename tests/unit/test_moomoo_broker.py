@@ -120,6 +120,10 @@ class TradeCtx:
                 ),
             ),
             "accinfo_query": (0, DF([{"currency": "N/A", "cash": 1000000.0, "power": 2000000.0}])),
+            "history_order_list_query": (
+                0,
+                DF([order_row(order_id="841874", order_status="CANCELLED_ALL", create_time="2026-11-13 16:00:46", updated_time="2026-11-13 20:01:00")]),
+            ),
         }
 
     def _call(self, name, kw):
@@ -134,6 +138,9 @@ class TradeCtx:
 
     def order_list_query(self, **kw):
         return self._call("order_list_query", kw)
+
+    def history_order_list_query(self, **kw):
+        return self._call("history_order_list_query", kw)
 
     def position_list_query(self, **kw):
         return self._call("position_list_query", kw)
@@ -280,6 +287,28 @@ def test_query_orders_refresh_passes_refresh_cache(broker, ctxs):
     broker.query_orders(open_only=False)
     kws = [kw for name, kw in trade.calls if name == "order_list_query"]
     assert [kw["refresh_cache"] for kw in kws[-2:]] == [True, False]
+
+
+def test_query_order_history_passes_et_window_env_and_acc(broker, ctxs):
+    """修复计划 2：vendor § Get Historical Orders。start/end 按美东时间、YYYY-MM-DD HH:MM:SS；显式带 trd_env、acc_id（默认 REAL）。"""
+    trade = ctxs[0]
+    start = datetime(2026, 11, 12, 21, 0, 46, tzinfo=UTC)  # 美东 16:00:46
+    end = datetime(2026, 11, 17, 15, 29, 5, tzinfo=UTC)  # 美东 10:29:05
+    got = broker.query_order_history(start, end)
+    kws = [kw for name, kw in trade.calls if name == "history_order_list_query"]
+    assert len(kws) == 1
+    kw = kws[0]
+    assert (kw["start"], kw["end"]) == ("2026-11-12 16:00:46", "2026-11-17 10:29:05")
+    assert kw["trd_env"] == "SIMULATE" and kw["acc_id"] == ACC
+    assert [(o.broker_order_id, o.raw_status, o.client_order_id) for o in got] == [("841874", "CANCELLED_ALL", CID)]
+    assert got[0].updated_at == datetime(2026, 11, 14, 1, 1, 0, tzinfo=UTC)
+
+
+def test_query_order_history_error_raises_broker_error(broker, ctxs):
+    trade = ctxs[0]
+    trade.responses["history_order_list_query"] = (-1, "network error")
+    with pytest.raises(BrokerError):
+        broker.query_order_history(datetime(2026, 11, 12, tzinfo=UTC), datetime(2026, 11, 17, tzinfo=UTC))
 
 
 def test_query_today_pnl_sums_all_rows_including_closed(broker, ctxs):

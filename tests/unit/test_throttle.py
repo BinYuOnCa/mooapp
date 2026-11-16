@@ -256,3 +256,30 @@ def test_open_broker_uses_shared_registry():
     src = (Path(__file__).resolve().parents[2] / "src" / "mooapp" / "broker" / "moomoo.py").read_text(encoding="utf-8")
     calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "ThrottledBroker"]
     assert calls and all({k.arg for k in c.keywords} >= {"registry", "account_key"} for c in calls)
+
+
+# ------------------------------------------------------------------ 修复计划 2：history_order_list_query 限流
+
+
+def test_history_query_rule_matches_vendor():
+    """vendor § Get Historical Orders › Interface Limitations：每个 acc_id 30 秒 10 次。"""
+    from mooapp.broker.throttle import HISTORY_ORDERS_RULE
+
+    assert (HISTORY_ORDERS_RULE.max_calls, HISTORY_ORDERS_RULE.window, HISTORY_ORDERS_RULE.margin) == (10, 30.0, 1.0)
+
+
+def test_throttled_broker_throttles_history_queries_separately_from_order_list():
+    c = FakeClock(T0)
+    fb = FakeBroker(env=Env.SIMULATE, clock=c)
+    b = ThrottledBroker(fb, c)
+    start = c.monotonic()
+    t0, t1 = T0 - timedelta(days=1), T0
+    for _ in range(10):
+        b.query_order_history(t0, t1)
+    for _ in range(10):
+        b.query_orders(open_only=False)  # 另一个接口，额度分开
+    assert c.monotonic() - start < 1.0
+    b.query_order_history(t0, t1)  # 第 11 次等窗口
+    assert c.monotonic() - start >= 31.0 - 1e-9
+    assert fb.calls("query_order_history")[0] == (t0, t1)
+
