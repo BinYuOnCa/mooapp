@@ -227,3 +227,21 @@ def test_deliver_or_enqueue_failure_goes_to_outbox():
     assert deliver_or_enqueue(Email("eod", "EOD", "b"), CFG.recipients, m, sys.store, sys.clock) is False
     pending = sys.store.due_emails(sys.clock.now())
     assert len(pending) == 1 and pending[0].kind == "eod"
+
+
+def test_stop_flushes_pending_digest_and_fill_windows_to_outbox():
+    """停止常驻进程时，未到时间的汇总与合并窗口写进 outbox，下次启动补发（不丢）。"""
+    sys = make_system()
+    m = FakeMailer()
+    n = notifier(sys, m)
+    sys.bus.publish(Alert("unknown_client_order_id", "x"))  # 非关键：进汇总
+    cid = sys.place(qty=5).order.client_order_id
+    sys.broker.step()
+    sys.pump.drain()
+    sys.broker.fill(sys.oms.get(cid).broker_order_id, 1, Decimal("10.00"))  # 部分成交：进合并窗口
+    sys.pump.drain()
+    n.tick()
+    assert m.sent == []
+    n.stop()
+    kinds = sorted(e.kind for e in sys.store.due_emails(sys.clock.now() + timedelta(days=1)))
+    assert kinds == ["digest", "fill"]
