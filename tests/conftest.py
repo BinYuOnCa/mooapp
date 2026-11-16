@@ -41,7 +41,7 @@ poll_fallback_seconds = 5
 enabled = true
 recipients = ["someone@example.com"]
 merge_partial_fills_seconds = 60
-heartbeat_minutes_before_open = 30
+heartbeat_minutes_before_open = 15
 
 [agent]
 auto_approve_simulate = false

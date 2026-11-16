@@ -79,3 +79,36 @@ def test_single_instance_lock():
 def test_build_runtime_refuses_real(tmp_path):
     with pytest.raises(RealDisabled):
         build_runtime(Env.REAL, tmp_path)
+
+
+# ------------------------------------------------------------------ M5：常驻进程启动、停止通知器
+
+
+def test_runtime_starts_and_stops_notifier():
+    class Dummy:
+        def __init__(self):
+            self.events = []
+
+        def start(self):
+            self.events.append("start")
+
+        def stop(self):
+            self.events.append("stop")
+
+    rt = runtime()
+    rt.notifier = Dummy()
+    rt.start()
+    rt.stop()
+    assert rt.notifier.events == ["start", "stop"]
+
+
+def test_build_runtime_wires_notifier_with_raw_store():
+    """静态检查：build_runtime 构造 Notifier，并传入数据库本身（store=store，不经 journal）。"""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "src" / "mooapp" / "ops" / "run.py").read_text(encoding="utf-8")
+    calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Notifier"]
+    assert calls
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    assert isinstance(kw.get("store"), ast.Name) and kw["store"].id == "store"
