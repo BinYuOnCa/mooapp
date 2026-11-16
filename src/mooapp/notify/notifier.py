@@ -96,11 +96,20 @@ class Notifier:
             self._thread.start()
 
     def stop(self) -> None:
-        """停止后台线程；未发出的邮件留在 outbox，下次启动补发。"""
+        """停止后台线程；队列里的事件、未到时间的合并窗口与汇总写进 outbox；未发出的邮件留在 outbox，下次启动补发。"""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(30.0)
             self._thread = None
+        now = self._clock.now()
+        emails: list[Email] = []
+        while True:
+            try:
+                emails.extend(self._compose(self._q.get_nowait(), now))
+            except queue.Empty:
+                break
+        emails.extend(self._composer.flush_all(now))
+        self._save([*self._unsaved, *emails], None, now)
 
     def _loop(self) -> None:
         while not self._stop.is_set():

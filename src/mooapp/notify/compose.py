@@ -119,6 +119,13 @@ class Composer:
             out.append(self._flush_digest(now))
         return out
 
+    def flush_all(self, now: datetime) -> list[Email]:
+        """停止时调用：把未到时间的合并窗口与汇总全部发出（交给 outbox，下次启动补发）。"""
+        out = [self._flush_fill(cid) for cid in list(self._windows)]
+        if self._digest_start is not None:
+            out.append(self._flush_digest(now))
+        return out
+
     def _flush_digest(self, now: datetime) -> Email:
         total = sum(self._digest.values())
         lines = [f"{self._digest_start.isoformat() if self._digest_start else ''} ～ {now.isoformat()} 共 {total} 条报警："]
