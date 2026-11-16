@@ -583,3 +583,10 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
   - 闸门拒绝本身说明这条规则在模拟盘按预期生效
   - 日志里 P10、契约测试的订单被报为 `external_order`（不在本地库），是预期行为
 
+
+## 修复计划 2：启动恢复改查历史订单（2026-11-16）
+
+- **结论**：启动恢复对「本地未完成、当日列表查不到」的订单（CREATED 除外）查一次 `history_order_list_query`，命中的按快照处理：DAY 过期的 CANCELLED_ALL 变成 CANCELED，已成交的照常合成成交。窗口取最早那张单的下单时间往前 1 天到现在往后 1 天，再按 client_order_id / broker_order_id 精确匹配，所以不依赖 vendor 没写清的时区。其余历史订单不处理，不报 unknown / external。历史查询出错报警 `history_query_failed`，恢复照常完成
+- **依据**：`tests/unit/test_recovery_history.py`（实现前 14 条失败，现在全部通过）；P9 第二次 `--check` 的实测
+- **出处**：vendor § Get Historical Orders（参数 start / end、Interface Limitations 30 秒 10 次）
+- **影响**：`BrokerPort.query_order_history`（SPEC 已加）、`broker/moomoo.py`、`broker/throttle.py`（`HISTORY_ORDERS_RULE`，与 `order_list_query` 分开计）、`broker/fake.py`（`roll_day()`）、`oms/oms.py`；本地仍为 NEW 的 841874、841875 下次启动时会被结束

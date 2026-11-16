@@ -19,7 +19,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, NotSupported, OrderRequest, Position
+from mooapp.broker.port import BrokerError, BrokerFill, BrokerOrder, BrokerPort, NotSupported, OrderRequest, Position
 from mooapp.clock import Clock
 from mooapp.common import Env, MooappError, Side, Source
 from mooapp.oms.events import Alert, CancelDue, DealPollRequested, EventBus, OmsReady, OrderChanged
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from mooapp.oms.executor import Executor
 
 log = logging.getLogger(__name__)
+HISTORY_MARGIN = timedelta(days=1)  # 修复计划 2：历史查询窗口前后各放宽 1 天（vendor 未写明时区）
 S, E = OrdStatus, EventType
 MARKET_TZ = ZoneInfo("America/New_York")  # ADR-0011：交易日按美东划分
 UNACKED = frozenset({S.PENDING_NEW, S.UNKNOWN})  # ADR-0026：可以挂「待撤」标记的状态
@@ -482,6 +483,9 @@ class OMS:
                     report.deals_source = "snapshot"
                 for d in deals:
                     self.ingest_fill(d, "poll")
+                missing = [o for o in local_open if o.client_order_id not in seen_cids and o.status is not S.CREATED]
+                if missing:
+                    seen_cids |= self._recover_from_history(missing)  # 修复计划 2：前一天的单当日列表查不到
                 for o in local_open:
                     if o.client_order_id in seen_cids:
                         continue
@@ -524,6 +528,34 @@ class OMS:
         self.bus.publish(OmsReady())
         log.info("启动恢复完成：检查 %d 张本地未完成订单，差异 %d 条", report.orders_checked, len(report.mismatches))
         return report
+
+    def _recover_from_history(self, missing: list[Order]) -> set[str]:
+        """修复计划 2（learnings「P9 第二次 --check」）：当日列表（order_list_query）查不到的本地未完成订单，
+        查一次历史订单（vendor § Get Historical Orders），命中的按快照处理（DAY 过期 CANCELLED_ALL → CANCELED，成交照常合成）。
+
+        vendor 没写清 start / end 的时区：窗口前后各放宽 HISTORY_MARGIN，再按 client_order_id / broker_order_id 精确匹配；
+        其余历史订单不处理（不报 unknown / external）。查询出错只报警，返回空集，调用方照旧按「券商查不到」处理。
+        """
+        start = min(o.created_at for o in missing) - HISTORY_MARGIN
+        end = self.clock.now() + HISTORY_MARGIN
+        try:
+            history = self.broker.query_order_history(start, end)
+        except BrokerError as e:
+            log.error("启动恢复查历史订单失败：%s", e)
+            self._issue("history_query_failed", None, {"error": str(e), "orders": [o.client_order_id for o in missing]})
+            return set()
+        by_cid = {o.client_order_id for o in missing}
+        by_bid = {o.broker_order_id: o.client_order_id for o in missing if o.broker_order_id}
+        found: set[str] = set()
+        for snap in history:
+            cid = snap.client_order_id if snap.client_order_id in by_cid else by_bid.get(snap.broker_order_id)
+            if cid is None or cid in found:
+                continue
+            self.ingest_snapshot(snap, "poll")
+            found.add(cid)
+        if found:
+            log.info("启动恢复：%d 张当日列表查不到的订单在历史订单中找到并已更新", len(found))
+        return found
 
     def _check_positions(self) -> None:
         net = self.store.net_fill_qty_by_symbol()

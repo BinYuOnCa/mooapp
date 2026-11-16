@@ -16,6 +16,8 @@ M3 新增（测试辅助）：
 - REAL 环境的 fill() 生成非合成的成交 id（D1、D2…），模拟实盘成交推送带 deal_id（vendor § Deals Push Callback）
 - M4：set_today_pnl / query_today_pnl（当日盈亏，None 表示字段无效）
 - M6b：subscribe_quotes / push_quote（报价推送）；snapshot 也记录调用
+- 修复计划 2：roll_day() 模拟跨日（未完成单按 DAY 过期为 CANCELLED_ALL，全部移入历史，当日列表清空，不推送）；
+  query_order_history(start, end) 按下单时间返回历史 + 当天订单（P9 实测：当天的单也查得到）
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -88,6 +90,7 @@ class FakeBroker:
         self._limits = {"place_order": _StrictLimit(PLACE_RULE), "cancel_order": _StrictLimit(CANCEL_RULE)} if strict_limits else {}
         self._calls: dict[str, list[tuple[Any, ...]]] = {}
         self._orders: dict[str, BrokerOrder] = {}
+        self._history: dict[str, BrokerOrder] = {}  # 修复计划 2：前一天及更早的订单，query_orders 查不到
         self._pending: list[tuple[str, str]] = []  # (动作, order_id)，由 step() 处理
         self._next_id = _FIRST_ORDER_ID
         self._cash = cash
@@ -119,6 +122,16 @@ class FakeBroker:
             with self._lock:
                 self._orders[o.broker_order_id] = o
             self._dispatch([o], [])
+
+    def roll_day(self) -> None:
+        """跨日：未完成单按 DAY 过期（CANCELLED_ALL，updated_at = 当前时间），全部订单移入历史；不推送（learnings「P9 第二次 --check」）。"""
+        with self._lock:
+            for oid, o in list(self._orders.items()):
+                if not o.is_terminal:
+                    o = self._update(oid, raw_status="CANCELLED_ALL")
+                self._history[oid] = o
+            self._orders.clear()
+            self._pending.clear()
 
     def seed_order(self, order: BrokerOrder) -> None:
         with self._lock:
@@ -305,6 +318,12 @@ class FakeBroker:
             self._record("query_orders", open_only, refresh)
             orders = list(self._orders.values())
         return [o for o in orders if not o.is_terminal] if open_only else orders
+
+    def query_order_history(self, start: datetime, end: datetime) -> list[BrokerOrder]:
+        with self._lock:
+            self._record("query_order_history", start, end)
+            orders = [*self._history.values(), *self._orders.values()]
+        return [o for o in orders if start <= o.created_at <= end]
 
     def query_deals(self) -> list[BrokerFill]:
         with self._lock:
