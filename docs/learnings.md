@@ -527,3 +527,50 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
   - **OMS 启动恢复的缺口**：恢复只查 `order_list_query`，本地仍为 NEW 的前一天订单（841874、841875）查不到，只报 `missing_at_broker`，本地状态一直停在 NEW。后果：每次启动都报警；halt 会去撤它们并被券商拒绝；持仓上限把它们的剩余量算作挂单。待修：缺失订单再查 `history_order_list_query`，按实际状态结束（需要先出计划）
   - 周一收盘后、周二的复查不再需要
 
+
+## M4 探针 P10：模拟盘当日盈亏与可卖数量（2026-11-16）
+
+#### 模拟盘 `today_pl_val` 有效，qty=0 的行仍带当日盈亏（P10a、P10b）
+
+- **结论**：
+  - 模拟账户 `position_list_query` 的 `today_pl_val` 是数值（不是 N/A），可以作为当日亏损规则的数据源（M4 确认点 2）。`today_trd_val`、`today_buy_qty`、`today_sell_qty`、`unrealized_pl`、`realized_pl` 在模拟盘都是 N/A，与 vendor 文档一致
+  - 卖光后 SPY 那一行仍在（qty=0、can_sell_qty=0），`today_pl_val` 仍有值，所以求和必须包括 qty=0 的行（`today_pnl_from_rows` 已经这样做）
+  - 本次一买一卖：买入 745.755、卖出 745.75，`pl_val` 卖出后为 −0.005（只反映这一轮）；`today_pl_val` 从买前的 −0.055 变为卖后的 −0.06（−0.055 + −0.005），是当日累计。买前的 −0.055 来自当天更早的成交：0.6 契约测试 10:42:43 买入约 744.71、10:43:15 市价卖出约 744.65（App 订单列表核对），价差约 −0.06
+  - 买单和市价卖单都在约 13 秒后成交；推送顺序 SUBMITTING → SUBMITTED → FILLED_ALL
+- **依据**：实测（2026-11-16 美东 10:48–10:49）
+- **出处**：vendor § Get Positions；`scripts/probe_m4_pnl.py` @ 3e52fe7
+- **记录**：`recordings/probes/probe_m4_pnl_20261116T154846Z.jsonl`；运行时间 2026-11-16T15:48:46Z；SDK 10.12.7208，OpenD 1012
+- **影响**：闸门的当日亏损规则在模拟盘可用，不会因为字段无效而拒绝所有买单。`today_pl_val` 是当日累计（含当天更早的成交）；何时清零（美东 0 点？开盘？）本次没有观察到
+
+#### 券商的 `can_sell_qty` 已扣掉挂着的卖单，闸门的可卖数量规则会重复扣（P10d）
+
+- **结论**：持仓 1 股、挂一张 1 股的限价卖单（820.41，远离市价）后，`qty=1`、`can_sell_qty=0`。券商的可卖数量已经扣除了未成交卖单。闸门目前按「`can_sell_qty` − 本程序未完成卖单剩余量 ≥ 本单」检查（M4 确认点 3），等于扣了两次：有 N 股卖单挂着时，再卖会被少算 N 股，可能被错误拒绝
+- **依据**：实测（同上，`p10.with_open_sell`）
+- **出处**：vendor § Get Positions（`can_sell_qty` 的含义文档未说明是否扣挂单）；`scripts/probe_m4_pnl.py` @ 3e52fe7
+- **记录**：同上
+- **影响**：`risk/gate.py` 的 `_collect` / `risk/rules.py` 的 can_sell 规则需要改为只用券商的 `can_sell_qty`（或用 qty − 本程序未完成卖单）。这改变了你确认过的 M4 确认点 3，要先出计划、经你确认（可能需要 ADR）。今天的 M4 验收只下买单、M6 验收触发时只有一张卖单，都不受影响
+
+## M6 探针 P11：报价推送（2026-11-16，常规时段）
+
+#### QUOTE 推送约每秒 6 条，不只在成交时推；时间是美东时间（P11a、P11b）
+
+- **结论**：
+  - 订阅 US.SPY 的 QUOTE 后，约 61 秒收到 367 条推送：本机接收间隔中位数 0.151 秒，最大 0.401 秒
+  - 推送不等于成交：相邻两条中 163 次 `last_price` 不变、190 次 `volume` 不变、160 次 `data_date + data_time` 与上一条相同。规则引擎必须容忍重复和价格不变的推送（按价格比较触发，本身是幂等的）
+  - `data_date`、`data_time` 是美东时间（11 月为 UTC−5）：按 UTC−5 换算后，本机接收比 `data_time` 晚 0.037–1.658 秒，中位数 0.084 秒。换算要用 America/New_York 时区（夏令时 UTC−4），不能写死 −5
+- **依据**：实测（2026-11-16 美东 11:01:13–11:02:13，市场状态 AFTERNOON）
+- **出处**：vendor § Subscribe and Unsubscribe、§ Real-time Quote Callback；`scripts/probe_m6_quote.py` @ 13f1486
+- **记录**：`recordings/probes/probe_m6_quote_20261116T160110Z.jsonl`；运行时间 2026-11-16T16:01:10Z；SDK 10.12.7208，OpenD 1012
+- **影响**：`strategy/engine.py` 每条推送只排进事件队列，每秒 6 条不构成压力；`poll_fallback_seconds` 的「推送中断」判断在常规时段几乎不会触发
+
+#### 常规时段的 `open_price` 是当天开盘价；盘前、盘后、夜盘价格是单独的字段（P11c、P11d 部分）
+
+- **结论**：
+  - 常规时段内，推送和快照的 `open_price` 都是 749.72，不同于 `prev_close_price` 754.37，是当天的开盘价；整段推送里 `open_price` 不变
+  - 推送和快照都带 `pre_price`（749.68）、`after_price`（749.6）、`overnight_price`（752.28）以及 `pre_*`、`after_*` 系列字段，延长时段的价格不混在 `last_price` 里。常规时段内 `after_price` 是上一交易日盘后的价格
+  - 开盘前 `open_price` 的取值、盘前盘后 `last_price` 是否变化，这次没有测（只在常规时段跑）
+- **依据**：实测（同上）
+- **出处**：同上
+- **记录**：同上
+- **影响**：规则引擎表达式里的 `open` 在常规时段可直接用 `open_price`；规则只在常规时段触发（M6b 确认点 1），所以盘前的取值不影响触发，但影响盘前 `rule add` 时的校验。待补：盘后（今天 16:00 后）或明天盘前再跑一次对照
+

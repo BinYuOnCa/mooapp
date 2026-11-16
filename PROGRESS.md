@@ -5,7 +5,7 @@
 **ADR-0030**（2026-11-14，你选 C）：`rule_add`、`rule_cancel` 也随命令行超时过期；halt、resume 不过期。`pytest` 759 passed，`pytest -m pg` 43 passed。命令行拿到 expired 结果时提示「命令已过期，未执行」（下单、撤单、规则命令都是），`pytest` 763 passed
 **M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
-**下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P9 已有结论（见下方「P9 结论」）
+**下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；P9 已有结论（见下方「P9 结论」）
 
 ## 周一操作清单（2026-11-16）
 
@@ -99,10 +99,10 @@
 ! uv run python scripts/probe_m4_pnl.py
 ```
 - 副作用：买 1 股 SPY（期望立即成交）→ 挂最新价 × 1.10 的卖单，查持仓后撤掉 → 市价卖 1 股，恢复原持仓
-- [ ] 退出码 0，stderr 没有 `# 失败：`
-- [ ] `p10.before`、`after_buy`、`after_sell` 的 `today_pl_val` 都是**数值**，`sum_today_pl_val` 不是「无法求和」
-- [ ] `p10.with_open_sell`：SPY 的 `can_sell_qty` 是否比 `qty` 少 1
-- [ ] App 里没有残留的 probe 挂单
+- [x] 退出码 0，stderr 没有 `# 失败：`
+- [x] `p10.before`、`after_buy`、`after_sell` 的 `today_pl_val` 都是**数值**，`sum_today_pl_val` 不是「无法求和」
+- [x] `p10.with_open_sell`：SPY 的 `can_sell_qty` 是否比 `qty` 少 1 → **是**（qty 1、can_sell 0）：闸门会重复扣，验收后出修复计划（learnings「M4 探针 P10」）
+- [x] App 里没有残留的 probe 挂单
 - `today_pl_val` 无效：闸门会拒绝所有买单，第 4、6 步必然失败 → **停下**，把结果发给 Claude
 - `can_sell_qty` 已扣掉挂着的卖单：闸门的可卖数量规则会重复扣，需要修，但不影响今天的验收
 - 把 `recordings/probes/probe_m4_pnl_<UTC>.jsonl` 的路径发给 Claude（按 7.2 格式写进 learnings）
@@ -114,7 +114,7 @@
 ```
 ! uv run python scripts/probe_m6_quote.py
 ```
-- [ ] 退出码 0，记录文件已生成
+- [x] 退出码 0，记录文件已生成
 - 要回答：报价推送频率、时间戳时区、`open_price` 取值；可选：16:00 后再跑一次，对照盘后 `last_price`
 - 把记录文件路径发给 Claude
 
