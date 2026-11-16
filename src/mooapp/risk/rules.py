@@ -41,6 +41,7 @@ class OrderContext:
     daily_pnl: Decimal | None  # ADR-0017；None = today_pl_val 不可用
     active_rule: str | None  # ADR-0020：该标的当前的活动规则 id
     rule_id: str | None = None  # M6b：本单属于哪条规则（规则自己的入场单不被 ADR-0020 拦）
+    open_sell_unacked: int = 0  # ADR-0031：open_sell_leaves 中券商还不知道的部分（CREATED / PENDING_NEW / UNKNOWN）
 
 
 @dataclass(frozen=True)
@@ -147,11 +148,17 @@ def max_position_qty(ctx: OrderContext, lim: RiskLimits, stale: float) -> Verdic
 def can_sell_qty(ctx: OrderContext, lim: RiskLimits, stale: float) -> Verdict | None:
     if ctx.req.side is not Side.SELL:
         return None
-    room = ctx.can_sell_qty - ctx.open_sell_leaves
+    # ADR-0031：券商 can_sell_qty 已扣所有已确认的卖单（P10d），只再扣券商还不知道的本程序卖单；
+    # 第二项保底（缓存尚未反映刚确认的卖单时），两项取小
+    by_broker = ctx.can_sell_qty - ctx.open_sell_unacked
+    by_own = ctx.position_qty - ctx.open_sell_leaves
+    room = min(by_broker, by_own)
     if ctx.req.qty > room:
         return _reject(
             "can_sell_qty",
-            f"可卖 {ctx.can_sell_qty} − 未成交卖单 {ctx.open_sell_leaves} = {room}，不够卖 {ctx.req.qty}（ADR-0002 不做空）",
+            f"可卖 min(券商可卖 {ctx.can_sell_qty} − 未确认卖单 {ctx.open_sell_unacked} = {by_broker}，"
+            f"持仓 {ctx.position_qty} − 本程序未完成卖单 {ctx.open_sell_leaves} = {by_own}) = {room}，"
+            f"不够卖 {ctx.req.qty}（ADR-0031；ADR-0002 不做空）",
         )
     return None
 

@@ -36,6 +36,16 @@ HISTORY_MARGIN = timedelta(days=1)  # 修复计划 2：历史查询窗口前后�
 S, E = OrdStatus, EventType
 MARKET_TZ = ZoneInfo("America/New_York")  # ADR-0011：交易日按美东划分
 UNACKED = frozenset({S.PENDING_NEW, S.UNKNOWN})  # ADR-0026：可以挂「待撤」标记的状态
+BROKER_UNSEEN = frozenset({S.CREATED, S.PENDING_NEW, S.UNKNOWN})  # ADR-0031：券商还不知道（或不确定）的订单
+
+
+@dataclass(frozen=True)
+class LeavesSummary:
+    """某标的本程序未完成订单的剩余量（闸门持仓上限、可卖规则用）。"""
+
+    buy: int
+    sell: int
+    sell_unacked: int  # sell 中券商还不知道的部分（BROKER_UNSEEN），ADR-0031
 
 
 class OrderNotFound(MooappError, KeyError):
@@ -160,17 +170,21 @@ class OMS:
         with self._lock:
             return sum(o.qty - o.cum_qty for o in self.store.list_orders(open_only=True) if o.symbol == symbol and o.side is side)
 
-    def open_leaves_both(self, symbol: str) -> tuple[int, int]:
-        """（买, 卖）两边的未成交剩余量，只扫一次订单表（M4 审查修复）。"""
-        buy = sell = 0
+    def open_leaves_summary(self, symbol: str) -> LeavesSummary:
+        """买、卖两边的未成交剩余量，以及卖单中券商还不知道的部分；只扫一次订单表（M4 审查修复、ADR-0031）。"""
+        buy = sell = unacked = 0
         with self._lock:
             for o in self.store.list_orders(open_only=True):
-                if o.symbol == symbol:
-                    if o.side is Side.BUY:
-                        buy += o.qty - o.cum_qty
-                    else:
-                        sell += o.qty - o.cum_qty
-        return buy, sell
+                if o.symbol != symbol:
+                    continue
+                leaves = o.qty - o.cum_qty
+                if o.side is Side.BUY:
+                    buy += leaves
+                else:
+                    sell += leaves
+                    if o.status in BROKER_UNSEEN:
+                        unacked += leaves
+        return LeavesSummary(buy, sell, unacked)
 
     def broker_position(self, symbol: str) -> Position | None:
         """券商总持仓（ADR-0019：持仓上限按总持仓算，含程序外部分）。vendor § Get Positions。"""

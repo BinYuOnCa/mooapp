@@ -13,7 +13,7 @@
 
 ### 计划 2：启动恢复改查历史订单（P9）
 
-**状态（2026-11-16）**：实现完成，`pytest` 778 passed，`pytest -m pg` 43 passed；新增测试 15 条（实现前 14 条失败，另 1 条是防回归）。待你：提交实现 → 启动一次 `mooapp run` 做模拟盘验证
+**状态（2026-11-16）**：实现完成，`pytest` 778 passed，`pytest -m pg` 43 passed；新增测试 15 条（实现前 14 条失败，另 1 条是防回归）。已提交。**模拟盘验证通过**（2026-11-16 美东 13:39）：启动 `mooapp run`，841874、841875 经历史订单 NEW → CANCELED（UNSOLICITED_CANCEL，origin poll），不再报 `missing_at_broker`；`mooapp order list` 无未完成订单。同时出现的 `external_order`（P10 探针单）、`unknown_client_order_id`（0.6 契约测试单）是 24 小时列表里的预期报警
 
 - 问题：恢复只用 `order_list_query`（当日列表）。前一天的单（841874、841875）查不到，只报 `missing_at_broker`，本地一直是 NEW
 - `broker/port.py`：BrokerPort 新增只读 `query_order_history(start, end) -> list[BrokerOrder]`
@@ -27,6 +27,8 @@
 - 不在本次：常驻进程跨过 20:00 时挂单是否及时结束（取决于推送，未观察）
 
 ### 计划 1：闸门可卖数量不再重复扣挂单（P10d）
+
+**状态（2026-11-16）**：实现完成，`pytest` 788 passed，`pytest -m pg` 43 passed；规则引擎和常驻进程的线程测试连跑 3 次都通过。新增测试 10 条（实现前 8 条失败；另 2 条闸门测试在旧 FakeBroker 上本来就通过，改了 FakeBroker 后才真正测到 bug）。`test_gate_m4.py::test_sell_counts_open_sell_orders` 测的是未确认卖单，新规则下结论不变，未改写
 
 - 新规则（ADR-0031，替代 M4 确认点 3 的卖出部分）：`可卖 = min(can_sell_qty − 本程序未确认卖单剩余量, 持仓 qty − 本程序全部未完成卖单剩余量)`；未确认 = PENDING_NEW、UNKNOWN
 - 文件：`docs/adr/0031-can-sell-from-broker.md`、`risk/rules.py`、`oms/oms.py`（`open_leaves_both` 同时给出未确认卖单剩余量，仍只扫一次）、`risk/gate.py`、`broker/fake.py`（`can_sell_qty` 扣已确认挂单，照 P10d）
@@ -199,8 +201,8 @@ cd ~/GitRepos/mooapp && uv run mooapp resume
 
 - [x] 提交今天的文档和你改的 `tests/acceptance/test_m4_halt.py`（ad15cd7、e23a395；cherry-pick 到 dev/milestone_4 为 1bc1233）
 - [x] 打 tag：`accept/milestone_3`（d238e28）、`accept/milestone_4`（d5c1f57）、`accept/milestone_6`（a9cf104），已推送
-- [ ] 修复计划 1：闸门可卖数量重复扣挂单（P10d）→ 已确认，见「修复计划」
-- [ ] 修复计划 2：启动恢复改查历史订单（P9）→ 已确认，见「修复计划」（先做）
+- [x] 修复计划 1：闸门可卖数量重复扣挂单（P10d）→ ADR-0031，已实现（见「修复计划」）
+- [x] 修复计划 2：启动恢复改查历史订单（P9）→ 已实现并在模拟盘验证（见「修复计划」）
 - [ ] 可选：美东 16:00 后再跑一次 P11 `uv run python scripts/probe_m6_quote.py`，看盘后 `last_price`、`open_price`
 - [x] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `build_runtime`（你本人修改）（2026-11-16 完成：分支 `fix/Post_Milestone_3` 提交 ae47027；价格系数 0.9 → 0.96，`build()` 等单实例锁释放；两条模拟盘重跑均 `1 passed`，App 核对 13:16:56 @712.48、13:18:35 @712.22 两张均已撤销）
 

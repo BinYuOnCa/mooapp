@@ -16,6 +16,7 @@ M3 新增（测试辅助）：
 - REAL 环境的 fill() 生成非合成的成交 id（D1、D2…），模拟实盘成交推送带 deal_id（vendor § Deals Push Callback）
 - M4：set_today_pnl / query_today_pnl（当日盈亏，None 表示字段无效）
 - M6b：subscribe_quotes / push_quote（报价推送）；snapshot 也记录调用
+- ADR-0031：query_positions 的 can_sell_qty 扣掉已确认（非 SUBMITTING）的未完成卖单剩余量（P10d 实测）
 - 修复计划 2：roll_day() 模拟跨日（未完成单按 DAY 过期为 CANCELLED_ALL，全部移入历史，当日列表清空，不推送）；
   query_order_history(start, end) 按下单时间返回历史 + 当天订单（P9 实测：当天的单也查得到）
 """
@@ -342,8 +343,12 @@ class FakeBroker:
     def query_positions(self) -> list[Position]:
         with self._lock:
             self._record("query_positions")
+            held: dict[str, int] = {}
+            for o in self._orders.values():  # P10d：券商的可卖数量已扣除已确认的未成交卖单
+                if o.side is Side.SELL and not o.is_terminal and o.raw_status != "SUBMITTING":
+                    held[o.symbol] = held.get(o.symbol, 0) + o.qty - o.dealt_qty
             return [
-                Position(symbol=s, qty=p.qty, can_sell_qty=p.qty, avg_cost=p.cost / p.qty)  # P5：当日买入即可卖
+                Position(symbol=s, qty=p.qty, can_sell_qty=max(p.qty - held.get(s, 0), 0), avg_cost=p.cost / p.qty)  # P5：当日买入即可卖
                 for s, p in self._positions.items()
                 if p.qty > 0
             ]

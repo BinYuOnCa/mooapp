@@ -590,3 +590,10 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
 - **依据**：`tests/unit/test_recovery_history.py`（实现前 14 条失败，现在全部通过）；P9 第二次 `--check` 的实测
 - **出处**：vendor § Get Historical Orders（参数 start / end、Interface Limitations 30 秒 10 次）
 - **影响**：`BrokerPort.query_order_history`（SPEC 已加）、`broker/moomoo.py`、`broker/throttle.py`（`HISTORY_ORDERS_RULE`，与 `order_list_query` 分开计）、`broker/fake.py`（`roll_day()`）、`oms/oms.py`；本地仍为 NEW 的 841874、841875 下次启动时会被结束
+
+## 修复计划 1：可卖数量不再重复扣已确认的卖单（ADR-0031，2026-11-16）
+
+- **结论**：卖出时可卖 = min(`can_sell_qty` − 本程序未确认卖单剩余量, 持仓 `qty` − 本程序全部未完成卖单剩余量)，未确认 = CREATED、PENDING_NEW、UNKNOWN。第一项用券商已扣好的数字，第二项在缓存还没刷新时保底，两项取小，五种情形都不会多算
+- **依据**：`tests/unit/test_risk_rules.py`（ADR-0031 一节，五种情形各「刚好够卖 / 多一股」）、`tests/unit/test_can_sell_adr31.py`；实现前 8 条失败
+- **教训**：FakeBroker 原来的 `can_sell_qty` 恒等于 `qty`，和真实券商不一样，正好掩盖了重复扣减。闸门那条回归测试（`test_gate_allows_selling_rest_after_acked_sell`）在旧 FakeBroker 上能通过；把 FakeBroker 按 P10d 改成扣已确认卖单之后，它才真正测到了 bug。**测试替身的行为要按实测校准**，否则测试通过并不说明代码正确
+- **影响**：`risk/rules.py`（`OrderContext.open_sell_unacked`）、`oms/oms.py`（`open_leaves_summary` 取代 `open_leaves_both`，仍只扫一次）、`risk/gate.py`、`broker/fake.py`
