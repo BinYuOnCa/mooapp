@@ -120,6 +120,23 @@ def test_fake_local_fill_is_break():
     assert "position_mismatch" in kinds(r)  # 本地净持仓 2 > 券商 1
 
 
+def test_fake_local_sell_fill_is_position_break_not_external():
+    """验收 2 实跑（2026-11-16）发现：假成交是卖出时，本程序净持仓为负；不能把差额当成「程序外持仓」。"""
+    sys = make_system()
+    trade_day(sys)
+    sell_cid = [o for o in sys.store.list_orders(open_only=False) if o.side is Side.SELL][0].client_order_id
+    o = sys.oms.get(sell_cid)
+    with sys.store.transaction():
+        for i in range(2):  # 本地多卖 2 股：净持仓 1 − 2 = −1
+            sys.store.insert_fill_once(
+                FillRecord(f"fake:{i}", sell_cid, o.broker_order_id, "US.SPY", Side.SELL, 1, D("10.50"), sys.clock.now(), False, "local")
+            )
+    close_market(sys)
+    r = eod(sys)
+    assert "position_mismatch" in kinds(r)
+    assert r.info["external_qty"] == {}
+
+
 def test_broker_fill_missing_locally_is_break():
     sys = make_system()
     cid = sys.place(qty=2).order.client_order_id
