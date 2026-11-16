@@ -77,6 +77,13 @@ def parse_et_time(text: Any) -> datetime:
     raise BrokerError(f"无法解析的时间：{text!r}（期望美东时间 yyyy-MM-dd HH:mm:ss）")
 
 
+def format_et_time(ts: datetime) -> str:
+    """parse_et_time 的反向：UTC → 美东本地时间 yyyy-MM-dd HH:mm:ss（vendor § Get Historical Orders 的 start / end 格式）。"""
+    if ts.tzinfo is None:
+        raise ValueError(f"需要带时区的时间：{ts!r}")
+    return ts.astimezone(MARKET_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _side(value: Any) -> Side:
     # vendor § Trading Definitions › TrdSide 还有 SELL_SHORT、BUY_BACK；v1 不支持，报错而不是猜映射
     try:

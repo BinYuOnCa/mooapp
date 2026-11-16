@@ -4,7 +4,7 @@ vendor 限频（各接口 Interface Limitations）：
 - § Place Orders：每个 acc_id 30 秒 15 次，连续两次间隔 ≥ 0.02 秒
 - § Modify or Cancel Orders：30 秒 20 次，间隔 ≥ 0.04 秒
 窗口多留 1 秒余量。持仓、资金查询走缓存不限流（§ Get Positions：只有刷新缓存时才受限频）；
-订单查询 M4 起全部按 § Get open Orders 限 30 秒 10 次。同一账户的实例经 ThrottleRegistry 共用限流器。
+订单查询 M4 起全部按 § Get open Orders 限 30 秒 10 次；历史订单按 § Get Historical Orders 另限 30 秒 10 次。同一账户的实例经 ThrottleRegistry 共用限流器。
 
 Throttle 采用「预约时间槽」：加锁计算本次最早可发出的时刻并登记，解锁后再 sleep。
 多线程同时排队时各自拿到不同的槽，不会同时冲进同一个窗口。
@@ -16,7 +16,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, Cash, OrderRequest, Position, Quote, RateLimited
@@ -37,7 +37,9 @@ PLACE_RULE = RateRule("place_order", max_calls=15, window=30.0, min_interval=0.0
 CANCEL_RULE = RateRule("modify_order", max_calls=20, window=30.0, min_interval=0.04, margin=1.0)
 # vendor § Get open Orders › Interface Limitations：每个 acc_id 30 秒 10 次。M4 默认做法 2：不分是否刷新缓存，全部限流
 QUERY_ORDERS_RULE = RateRule("order_list_query", max_calls=10, window=30.0, min_interval=0.0, margin=1.0)
-_RULES = (PLACE_RULE, CANCEL_RULE, QUERY_ORDERS_RULE)
+# vendor § Get Historical Orders › Interface Limitations：每个 acc_id 30 秒 10 次（与 order_list_query 分开计）
+HISTORY_ORDERS_RULE = RateRule("history_order_list_query", max_calls=10, window=30.0, min_interval=0.0, margin=1.0)
+_RULES = (PLACE_RULE, CANCEL_RULE, QUERY_ORDERS_RULE, HISTORY_ORDERS_RULE)
 
 DEFAULT_MAX_WAIT = 60.0
 
@@ -117,6 +119,7 @@ class ThrottledBroker:
         self._place = throttles[PLACE_RULE.name]
         self._cancel = throttles[CANCEL_RULE.name]
         self._query_orders = throttles[QUERY_ORDERS_RULE.name]
+        self._query_history = throttles[HISTORY_ORDERS_RULE.name]
 
     @property
     def env(self) -> Env:
@@ -135,6 +138,10 @@ class ThrottledBroker:
     def query_orders(self, open_only: bool = True, refresh: bool = False) -> list[BrokerOrder]:
         self._query_orders.acquire()
         return self.inner.query_orders(open_only=open_only, refresh=refresh)
+
+    def query_order_history(self, start: datetime, end: datetime) -> list[BrokerOrder]:
+        self._query_history.acquire()
+        return self.inner.query_order_history(start, end)
 
     def query_deals(self) -> list[BrokerFill]:
         return self.inner.query_deals()

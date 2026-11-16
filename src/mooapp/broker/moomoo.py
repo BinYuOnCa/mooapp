@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,7 @@ from mooapp.broker import opend
 from mooapp.broker.convert import (
     FillSynthesizer,
     cash_from_row,
+    format_et_time,
     order_from_row,
     position_from_row,
     quote_from_push_row,
@@ -209,6 +210,17 @@ class MoomooBroker:
         )
         orders = [order_from_row(r) for r in rows]
         return [o for o in orders if not o.is_terminal] if open_only else orders
+
+    def query_order_history(self, start: datetime, end: datetime) -> list[BrokerOrder]:
+        # vendor § Get Historical Orders：start / end 为 YYYY-MM-DD HH:MM:SS；文档没写股票用哪个时区，按美东传
+        # （与 create_time 一致）；调用方用宽窗口 + 订单号匹配，不依赖时区精确（修复计划 2）。trd_env 默认 REAL，必须显式传
+        rows = self._rows(
+            "history_order_list_query",
+            self._trade.history_order_list_query(
+                start=format_et_time(start), end=format_et_time(end), trd_env=self._trd_env, acc_id=self._acc_id
+            ),
+        )
+        return [order_from_row(r) for r in rows]
 
     def query_deals(self) -> list[BrokerFill]:
         # vendor § Get Today's Deals：只支持实盘（P4 实测 "Paper trading does not support deal data."）

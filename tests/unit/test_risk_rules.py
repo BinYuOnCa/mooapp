@@ -321,3 +321,35 @@ def test_no_active_rule_rule_buy_passes():
 def test_first_failing_rule_reported():
     ctx = replace(BASE, req=req(symbol="US.AAPL", qty=1000), quote=quote(symbol="US.AAPL"), orders_sent_today=999)
     rejected(ctx, "whitelist")
+
+
+# ------------------------------------------------------------------ ADR-0031：可卖数量不再重复扣已确认的本程序卖单（P10d）
+
+
+def sell(qty, **kw):
+    return replace(BASE, req=req(side=Side.SELL, qty=qty), **kw)
+
+
+@pytest.mark.parametrize(
+    "case, fits, facts",
+    [
+        # 持仓 10，本程序已确认卖单 3：券商 can_sell 已扣成 7
+        ("acked_own_sell", 7, dict(position_qty=10, can_sell_qty=7, open_sell_leaves=3, open_sell_unacked=0)),
+        # P10d：持仓 2，本程序已确认卖单 1：can_sell 1
+        ("p10d", 1, dict(position_qty=2, can_sell_qty=1, open_sell_leaves=1, open_sell_unacked=0)),
+        # 持仓 10，App 里（程序外）挂了卖单 3：can_sell 7，本程序没有卖单
+        ("external_sell", 7, dict(position_qty=10, can_sell_qty=7, open_sell_leaves=0, open_sell_unacked=0)),
+        # 持仓 10，本程序刚下的卖单 3 券商还没确认：can_sell 仍是 10
+        ("unacked_own_sell", 7, dict(position_qty=10, can_sell_qty=10, open_sell_leaves=3, open_sell_unacked=3)),
+        # 已确认但券商持仓缓存还没刷新：can_sell 仍是 10，由第二项保底
+        ("stale_broker_cache", 7, dict(position_qty=10, can_sell_qty=10, open_sell_leaves=3, open_sell_unacked=0)),
+    ],
+)
+def test_can_sell_min_of_broker_and_own(case, fits, facts):
+    ok(sell(fits, **facts))
+    rejected(sell(fits + 1, **facts), "can_sell_qty")
+
+
+def test_can_sell_reason_shows_both_terms():
+    v = check(sell(8, position_qty=10, can_sell_qty=7, open_sell_leaves=3, open_sell_unacked=0))
+    assert not v.ok and "7" in v.reason and "ADR-0031" in v.reason

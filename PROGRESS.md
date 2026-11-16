@@ -7,6 +7,41 @@
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
 
+## 修复计划（已确认 2026-11-16，分支 `fix/Post_Milestone_3`）
+
+周一验收中发现的两个问题。你的决定：计划 1 选 A（`min` 公式 + ADR-0031）；计划 2 照做；SPEC 由 Claude 改；**先做计划 2**。每份先提交失败的测试，再提交实现。
+
+### 计划 2：启动恢复改查历史订单（P9）
+
+**状态（2026-11-16）**：实现完成，`pytest` 778 passed，`pytest -m pg` 43 passed；新增测试 15 条（实现前 14 条失败，另 1 条是防回归）。已提交。**模拟盘验证通过**（2026-11-16 美东 13:39）：启动 `mooapp run`，841874、841875 经历史订单 NEW → CANCELED（UNSOLICITED_CANCEL，origin poll），不再报 `missing_at_broker`；`mooapp order list` 无未完成订单。同时出现的 `external_order`（P10 探针单）、`unknown_client_order_id`（0.6 契约测试单）是 24 小时列表里的预期报警
+
+- 问题：恢复只用 `order_list_query`（当日列表）。前一天的单（841874、841875）查不到，只报 `missing_at_broker`，本地一直是 NEW
+- `broker/port.py`：BrokerPort 新增只读 `query_order_history(start, end) -> list[BrokerOrder]`
+- `broker/moomoo.py`：`history_order_list_query` 实现（vendor § Get Historical Orders），时间按美东传
+- `broker/throttle.py`：新规则 `history_order_list_query` 30 秒 10 次（vendor § Get Historical Orders › Interface Limitations），按账户共用
+- `oms/oms.py` recover：本地未完成、当日列表查不到（CREATED 除外）的订单，**只查一次**历史，窗口 = 最早下单时间前 1 天 ～ 现在后 1 天（vendor 没写清时区，用宽窗口 + 订单号精确匹配，不猜时区）；命中的交给 `ingest_snapshot`（origin=poll）；查不到的照旧 `missing_at_broker`；历史查询出错报警 `history_query_failed`、照旧处理、不让恢复失败
+- `broker/fake.py`：`roll_day()` 模拟跨日（未完成单按 DAY 过期为 CANCELLED_ALL，全部移入历史，当日列表清空）；`query_order_history`
+- SPEC：BrokerPort 接口列表加一行
+- 测试（先写、先失败）：过期 → CANCELED 且不报 missing；历史显示成交 → FILLED 并记成交；历史也查不到 → 照旧 missing；历史查询出错 → 报警、恢复完成；只调一次历史；无缺失时不调；限流规则；Moomoo 适配器传参
+- 模拟盘验证：启动一次 `mooapp run`，841874、841875 变为 CANCELED，`missing_at_broker` 消失（不下单）
+- 不在本次：常驻进程跨过 20:00 时挂单是否及时结束（取决于推送，未观察）
+
+### 计划 1：闸门可卖数量不再重复扣挂单（P10d）
+
+**模拟盘验证（2026-11-16）**：
+- 第一次运行 `tests/contract/test_gate_can_sell_sim.py` 失败：断言「卖单确认后 10 秒内缓存 can_sell 会扣减」不成立 → 写探针 P12 实测：OpenD 缓存不随下单、撤单自动更新，只有刷新查询才更新（learnings「M4 探针 P12」；ADR-0031 补「实测补充」与已知局限）
+- 改断言后第二次运行 `1 passed`（美东约 14:20）：缓存 qty 2、can_sell 2（未扣）；第 2 张卖单放行；第 3 张被拒，理由 `min(2 − 0, 2 − 2) = 0`。这次是缓存未刷新的情形，验证的是「不卖超」；「已刷新时不重复扣」由 FakeBroker 测试覆盖（`test_can_sell_adr31.py`）
+- 回归第 2 步 `pytest -m sim tests/contract`：17 passed（5 分 33 秒，无限频报错）；P10d/P12 契约打印「qty 1 → 1，can_sell_qty 1 → 1」（缓存未扣，符合 P12）；闸门端到端测试再次通过
+- 回归第 3–7 步（美东约 14:30–14:40，修复分支上）：M3 幂等 `1 passed`；M3 重启恢复 `1 passed`（843601，本地 NEW / 券商 SUBMITTED）；M4 halt `1 passed`；`mooapp resume` 解除；M6 OCO `1 passed`（这次 **stop 触发**，卖单 843612 @740.02；上午是 take 触发，两边都在模拟盘验证过）
+- **计划 1、计划 2 全部完成，回归全部通过**；下一步：合并 `fix/Post_Milestone_3` 进 main
+
+**状态（2026-11-16）**：实现完成，`pytest` 788 passed，`pytest -m pg` 43 passed；规则引擎和常驻进程的线程测试连跑 3 次都通过。新增测试 10 条（实现前 8 条失败；另 2 条闸门测试在旧 FakeBroker 上本来就通过，改了 FakeBroker 后才真正测到 bug）。`test_gate_m4.py::test_sell_counts_open_sell_orders` 测的是未确认卖单，新规则下结论不变，未改写
+
+- 新规则（ADR-0031，替代 M4 确认点 3 的卖出部分）：`可卖 = min(can_sell_qty − 本程序未确认卖单剩余量, 持仓 qty − 本程序全部未完成卖单剩余量)`；未确认 = PENDING_NEW、UNKNOWN
+- 文件：`docs/adr/0031-can-sell-from-broker.md`、`risk/rules.py`、`oms/oms.py`（`open_leaves_both` 同时给出未确认卖单剩余量，仍只扫一次）、`risk/gate.py`、`broker/fake.py`（`can_sell_qty` 扣已确认挂单，照 P10d）
+- 测试：四种情形各「刚好够卖 / 差一股」；`test_gate_m4.py::test_sell_counts_open_sell_orders` 按新语义改写
+- 不碰 `tests/acceptance/`，不改风控限额
+
 ## 周一操作清单（2026-11-16）
 
 ### 先确认的重点
@@ -171,12 +206,12 @@ cd ~/GitRepos/mooapp && uv run mooapp resume
 
 ### 验收后待办（2026-11-16 新增）
 
-- [ ] 提交今天的文档和你改的 `tests/acceptance/test_m4_halt.py`
-- [ ] 打 tag：`/milestone-git finish 3` → `finish 4` → `finish 6`（顺序与时机由你定）
-- [ ] 修复计划 1：闸门可卖数量重复扣挂单（P10d；改动 M4 确认点 3，需要你确认，可能需要 ADR）
-- [ ] 修复计划 2：启动恢复对「本地未结束、当日订单列表查不到」的订单改查历史订单并按实际状态结束（P9；841874、841875 现在仍是本地 NEW）
+- [x] 提交今天的文档和你改的 `tests/acceptance/test_m4_halt.py`（ad15cd7、e23a395；cherry-pick 到 dev/milestone_4 为 1bc1233）
+- [x] 打 tag：`accept/milestone_3`（d238e28）、`accept/milestone_4`（d5c1f57）、`accept/milestone_6`（a9cf104），已推送
+- [x] 修复计划 1：闸门可卖数量重复扣挂单（P10d）→ ADR-0031，已实现（见「修复计划」）
+- [x] 修复计划 2：启动恢复改查历史订单（P9）→ 已实现并在模拟盘验证（见「修复计划」）
 - [ ] 可选：美东 16:00 后再跑一次 P11 `uv run python scripts/probe_m6_quote.py`，看盘后 `last_price`、`open_price`
-- [ ] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `build_runtime`（你本人修改）
+- [x] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `build_runtime`（你本人修改）（2026-11-16 完成：分支 `fix/Post_Milestone_3` 提交 ae47027；价格系数 0.9 → 0.96，`build()` 等单实例锁释放；两条模拟盘重跑均 `1 passed`，App 核对 13:16:56 @712.48、13:18:35 @712.22 两张均已撤销）
 
 ### 结果发给 Claude
 
@@ -511,7 +546,7 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 - [ ] M4（周一常规时段）：`! uv run python scripts/probe_m4_pnl.py`（P10：模拟盘 today_pl_val 是否有效）。无效时闸门会拒绝所有买单，先看 P10 的结果再跑 M4 验收
 - [ ] M4（周一之前）：在 secrets 里加 `[resume] key`（`python3 -c "import secrets; print(secrets.token_hex(32))"` 生成，文件权限保持 600），然后重启 `mooapp run`。没有这把密钥，常驻进程会拒绝所有 resume（ADR-0029）
 - [ ] M4（周一常规时段）：`! uv run pytest -m sim tests/acceptance/test_m4_halt.py`，结束后 `! uv run mooapp resume`（halt 跨重启保留）
-- [ ] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `mooapp.ops.run.build_runtime`（M4 的闸门签名已变，旧写法在 dev/milestone_4 上会失败；你本人修改）
+- [x] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `mooapp.ops.run.build_runtime`（M4 的闸门签名已变，旧写法在 dev/milestone_4 上会失败；你本人修改）（2026-11-16 完成：分支 `fix/Post_Milestone_3` 提交 ae47027；价格系数 0.9 → 0.96，`build()` 等单实例锁释放；两条模拟盘重跑均 `1 passed`，App 核对 13:16:56 @712.48、13:18:35 @712.22 两张均已撤销）
 
 - [ ] M3：确认是否所有 `order_list_query` 都限流（目前只限 refresh=True）
 - [ ] M3：跑探针 P9：`! uv run python scripts/probe_m3_expiry.py`（美东 15:45–16:00），次日 `--check <order_id>`；App 里删一张远离市价的单后再 `--check`

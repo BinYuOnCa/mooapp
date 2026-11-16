@@ -583,3 +583,33 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
   - 闸门拒绝本身说明这条规则在模拟盘按预期生效
   - 日志里 P10、契约测试的订单被报为 `external_order`（不在本地库），是预期行为
 
+
+## 修复计划 2：启动恢复改查历史订单（2026-11-16）
+
+- **结论**：启动恢复对「本地未完成、当日列表查不到」的订单（CREATED 除外）查一次 `history_order_list_query`，命中的按快照处理：DAY 过期的 CANCELLED_ALL 变成 CANCELED，已成交的照常合成成交。窗口取最早那张单的下单时间往前 1 天到现在往后 1 天，再按 client_order_id / broker_order_id 精确匹配，所以不依赖 vendor 没写清的时区。其余历史订单不处理，不报 unknown / external。历史查询出错报警 `history_query_failed`，恢复照常完成
+- **依据**：`tests/unit/test_recovery_history.py`（实现前 14 条失败，现在全部通过）；P9 第二次 `--check` 的实测
+- **出处**：vendor § Get Historical Orders（参数 start / end、Interface Limitations 30 秒 10 次）
+- **影响**：`BrokerPort.query_order_history`（SPEC 已加）、`broker/moomoo.py`、`broker/throttle.py`（`HISTORY_ORDERS_RULE`，与 `order_list_query` 分开计）、`broker/fake.py`（`roll_day()`）、`oms/oms.py`；本地仍为 NEW 的 841874、841875 下次启动时会被结束
+
+## 修复计划 1：可卖数量不再重复扣已确认的卖单（ADR-0031，2026-11-16）
+
+- **结论**：卖出时可卖 = min(`can_sell_qty` − 本程序未确认卖单剩余量, 持仓 `qty` − 本程序全部未完成卖单剩余量)，未确认 = CREATED、PENDING_NEW、UNKNOWN。第一项用券商已扣好的数字，第二项在缓存还没刷新时保底，两项取小，五种情形都不会多算
+- **依据**：`tests/unit/test_risk_rules.py`（ADR-0031 一节，五种情形各「刚好够卖 / 多一股」）、`tests/unit/test_can_sell_adr31.py`；实现前 8 条失败
+- **教训**：FakeBroker 原来的 `can_sell_qty` 恒等于 `qty`，和真实券商不一样，正好掩盖了重复扣减。闸门那条回归测试（`test_gate_allows_selling_rest_after_acked_sell`）在旧 FakeBroker 上能通过；把 FakeBroker 按 P10d 改成扣已确认卖单之后，它才真正测到了 bug。**测试替身的行为要按实测校准**，否则测试通过并不说明代码正确
+- **影响**：`risk/rules.py`（`OrderContext.open_sell_unacked`）、`oms/oms.py`（`open_leaves_summary` 取代 `open_leaves_both`，仍只扫一次）、`risk/gate.py`、`broker/fake.py`
+
+## M4 探针 P12：OpenD 缓存的持仓不随下单、撤单自动更新（2026-11-16）
+
+#### `refresh_cache=False` 的 can_sell_qty 只在成交或刷新查询后更新（P12）
+
+- **结论**：
+  - 卖单 843445 确认后，缓存查询（`refresh_cache=False`）的 `can_sell_qty` 仍是 1，没有扣；第一次刷新查询（`refresh_cache=True`）返回 0，**此后**缓存查询也一直是 0（60 秒）。撤单后缓存仍是 0，直到下一次刷新查询返回 1，之后缓存才是 1
+  - 买入成交 3 秒后，缓存查询已经是 qty 1、can_sell 1：成交会立即更新缓存
+  - 结合下午闸门模拟盘测试（卖单确认 10 秒后缓存仍未扣）：缓存不会因为下单、撤单自动更新，只有刷新查询会把它更新
+- **依据**：实测（2026-11-16 美东 14:03–14:05，常规时段）
+- **出处**：vendor § Get Positions（`refresh_cache`：缓存与刷新，文档未说明缓存何时更新）；`scripts/probe_m4_can_sell_cache.py` @ 2e31fe6（运行时探针文件尚未提交）
+- **记录**：`recordings/probes/probe_m4_can_sell_cache_20261116T190324Z.jsonl`；运行时间 2026-11-16T19:03:24Z；SDK 10.12.7208，OpenD 1012
+- **影响**：
+  - 闸门读到的 `can_sell_qty` 是否已扣挂单，取决于最近有没有人做过刷新查询；ADR-0031 的两项取小在两种情况下都正确（ADR-0031 已补「实测补充」）
+  - P10d 的契约测试改为接受两种结果（已扣 / 未扣），只锁定 qty 不变、can_sell 不会多出来
+  - 已知局限（写进 ADR-0031）：缓存未刷新时，App 里新挂的卖单闸门看不到；是否在卖出前刷新查询，以后另行决定

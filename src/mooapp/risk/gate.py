@@ -238,7 +238,7 @@ class RiskGate:
         # 库里的事实：读不到就拒（ADR-0025）
         try:
             sent = self._oms.orders_sent_today()
-            buy_leaves, sell_leaves = self._oms.open_leaves_both(req.symbol)  # 只扫一次订单表
+            leaves = self._oms.open_leaves_summary(req.symbol)  # 只扫一次订单表
             rule_id = self._store.active_rule_for(req.symbol)
         except StoreUnavailable as e:
             return self._reject("store_unavailable", f"读不到当日次数或挂单（ADR-0025），拒绝新单：{e}", intent)
@@ -257,8 +257,9 @@ class RiskGate:
             now=self._clock.now(),
             position_qty=pos.qty if pos else 0,
             can_sell_qty=pos.can_sell_qty if pos else 0,
-            open_buy_leaves=buy_leaves,
-            open_sell_leaves=sell_leaves,
+            open_buy_leaves=leaves.buy,
+            open_sell_leaves=leaves.sell,
+            open_sell_unacked=leaves.sell_unacked,
             orders_sent_today=sent,
             daily_pnl=pnl,
             active_rule=rule_id,

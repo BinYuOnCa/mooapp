@@ -10,6 +10,7 @@ M2 还没有闸门：这里直接调用 BrokerPort.place_order / cancel_order，
 模拟盘上的副作用：
 - US.SPY 限价买 1 股 × 21 笔，价格 = 最新价 × 0.9（向下取到 0.01），不期望成交，全部撤销
 - 常规时段另有：US.SPY 限价买 1 股 @ 卖一价 × 1.002（期望成交），随后市价卖 1 股恢复原持仓
+- 常规时段另有（P10d 契约，2026-11-16）：同上买 1 股，挂限价卖 1 股 @ 最新价 × 1.10（不会成交），查持仓后撤单，再市价卖 1 股
 """
 
 from __future__ import annotations
@@ -220,6 +221,49 @@ def test_marketable_buy_fills_and_emits_one_fill(h: Harness):
         pos = {p.symbol: p for p in h.broker.query_positions()}
         assert pos[SYMBOL].can_sell_qty >= 1  # P5：当日买入可卖
     finally:
+        if h.order(buy.broker_order_id).dealt_qty:
+            sell = h.broker.place_order(OrderRequest(new_client_order_id(), SYMBOL, Side.SELL, 1, OrderKind.MARKET, None))
+            h.exchange_fills(sell, last_price(h))
+            h.wait_status(sell.broker_order_id, {"FILLED_ALL"}, FILL_TIMEOUT)
+        else:
+            cancel_all(h, [buy])
+
+
+def test_can_sell_excludes_acked_open_sell(h: Harness):
+    """P10d / P12（SPEC 7.1 R9；ADR-0031 依赖的券商行为）：已确认的未成交卖单不改变 qty；can_sell_qty 要么已扣掉它，要么还没扣。
+    BrokerPort 查持仓走 OpenD 缓存：P12 实测缓存不随下单自动更新，只有 refresh_cache=True 的查询才刷新（之后缓存才扣），
+    所以模拟盘上两种结果都可能；FakeBroker 模拟「已刷新」（扣）。ADR-0031 的规则在两种情况下都正确，这里只锁定「不会多出来」。
+    模拟盘副作用：限价买 1 股 @ 卖一价 × 1.002（期望成交）→ 限价卖 1 股 @ 最新价 × 1.10（不会成交）→ 撤单 → 市价卖 1 股恢复原持仓。"""
+    if not h.in_regular_hours():
+        pytest.skip("需要常规时段（成交）")
+    q = h.broker.snapshot([SYMBOL])[0]
+    ask = q.ask or q.last
+    buy = h.broker.place_order(
+        OrderRequest(new_client_order_id(), SYMBOL, Side.BUY, 1, OrderKind.LIMIT, (ask * Decimal("1.002")).quantize(TICK, rounding=ROUND_UP))
+    )
+    far = None
+    try:
+        h.exchange_fills(buy, ask)
+        h.wait_status(buy.broker_order_id, {"FILLED_ALL"}, FILL_TIMEOUT)
+
+        def pos():
+            return {p.symbol: p for p in h.broker.query_positions()}.get(SYMBOL)
+
+        assert h.wait(lambda: pos() is not None and pos().can_sell_qty >= 1, 10.0)
+        before = pos()
+        far_px = (last_price(h) * Decimal("1.10")).quantize(TICK, rounding=ROUND_UP)
+        far = h.broker.place_order(OrderRequest(new_client_order_id(), SYMBOL, Side.SELL, 1, OrderKind.LIMIT, far_px))
+        h.wait_status(far.broker_order_id, {"SUBMITTED"}, CANCEL_TIMEOUT)
+        time.sleep(0 if isinstance(h, FakeHarness) else 3.0)
+        after = pos()
+        print(f"\nP10d/P12 契约：确认卖单后 qty {before.qty} → {after.qty}，can_sell_qty {before.can_sell_qty} → {after.can_sell_qty}")
+        assert after.qty == before.qty
+        assert after.can_sell_qty in (before.can_sell_qty, before.can_sell_qty - 1), (before, after)
+        if isinstance(h, FakeHarness):
+            assert after.can_sell_qty == before.can_sell_qty - 1  # FakeBroker 模拟已刷新的缓存（P10d）
+    finally:
+        if far is not None:
+            cancel_all(h, [far])
         if h.order(buy.broker_order_id).dealt_qty:
             sell = h.broker.place_order(OrderRequest(new_client_order_id(), SYMBOL, Side.SELL, 1, OrderKind.MARKET, None))
             h.exchange_fills(sell, last_price(h))
