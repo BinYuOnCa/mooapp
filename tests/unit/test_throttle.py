@@ -283,3 +283,36 @@ def test_throttled_broker_throttles_history_queries_separately_from_order_list()
     assert c.monotonic() - start >= 31.0 - 1e-9
     assert fb.calls("query_order_history")[0] == (t0, t1)
 
+
+# ------------------------------------------------------------------ M7：持仓刷新查询限流（vendor § Get Positions：刷新缓存时受限频）
+
+
+def test_positions_refresh_throttled_cache_not():
+    from mooapp.broker.throttle import POSITIONS_REFRESH_RULE
+
+    assert (POSITIONS_REFRESH_RULE.max_calls, POSITIONS_REFRESH_RULE.window) == (10, 30.0)
+    c = FakeClock(T0)
+    fb = FakeBroker(env=Env.SIMULATE, clock=c)
+    b = ThrottledBroker(fb, c)
+    start = c.monotonic()
+    for _ in range(30):
+        b.query_positions()  # 缓存：不限流
+    for _ in range(10):
+        b.query_positions(refresh=True)
+    assert c.monotonic() - start < 1.0
+    b.query_positions(refresh=True)
+    assert c.monotonic() - start >= 31.0 - 1e-9
+    assert fb.calls("query_positions")[-1] == (True,)
+
+
+def test_close_times_passthrough():
+    from datetime import date
+
+    c = FakeClock(T0)
+    fb = FakeBroker(env=Env.SIMULATE, clock=c)
+    fb.set_half_day(date(2026, 11, 27))
+    b = ThrottledBroker(fb, c)
+    got = b.close_times(date(2026, 11, 25), date(2026, 11, 28))
+    assert sorted(got) == [date(2026, 11, 25), date(2026, 11, 26), date(2026, 11, 27)]  # FakeBroker 只排除周末和 set_holiday
+    assert got[date(2026, 11, 27)].hour == 13
+
