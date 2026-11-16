@@ -7,6 +7,39 @@
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
 
+## M7 计划（决定已确认 2026-11-16；数据来源按 P13 / P11 / P8 实测定稿，待你确认；分支 `dev/milestone_7`）
+
+目标：SPEC 8 节 M7 三条验收（构造数据算到分；插假成交出 [BREAK]；模拟盘连续 5 个交易日对账零差异）。
+
+### 你的决定（2026-11-16）
+
+1. `mooapp eod [--date]` 是只读命令：命令行进程直接读库、查券商，不经常驻进程和闸门
+2. M7 只提供手动命令，收盘后 30 分钟由你运行；自动调度留到 M9
+3. 汇总邮件等 M5 做完再接；M7 先写 CSV 并在终端打印
+4. 结果**同时**写 CSV（`reports/YYYY-MM-DD.csv`）和数据库表 `eod_reports`（新迁移 0004，以后 Agent 可查）
+5. 验收 3（保留 5 天，你 2026-11-16 选 A）：连续 5 个交易日，每天盘中有成交（跑 M6 验收或 1 股买卖），收盘后跑 `mooapp eod` 零差异；有一天不为零或漏跑就从头数；休市日不算。**2026-11-16 不算**（代码未写，补跑时无法取当天收盘持仓），但 M7 完成后先补跑这一天作为第一轮实测
+6. 内部全程 Decimal 不舍入，只在报告输出时 ROUND_HALF_UP 到 0.01；手算按同一口径
+
+### 已定约束
+
+- ADR-0010 平均成本法、未实现用当日常规时段收盘价；ADR-0019 只核算本程序订单，程序外的只报告
+- 模拟盘无成交记录（P4）、无订单费用（P7）：成交来自订单快照 dealt_qty / 均价，费用记 0 并注明；实盘用 order_fee_query
+
+### 设计要点（数据来源依据：learnings「M7 探针 P13」「P12」「P8」）
+
+- **运行时点**：不早于当天收盘后 30 分钟（WHOLE 日 16:30，半日市 MORNING 日 13:30；P8）。更早运行直接报错退出（收盘价在收盘后几分钟内会被修订，P13）。`--date` 默认今天（美东）；只支持今天（收盘后）和上一个交易日，更早的日期报错
+- **三方对账**（只核算本程序订单，ADR-0019）：
+  - ① 本地：OMS 库里该交易日的 fills、按标的的净持仓
+  - ② 券商订单：今天用 `query_orders(open_only=False, refresh=True)`（P13：收盘后 30 分钟仍完整，84 张三处一致）；上一个交易日用 `query_order_history`
+  - ③ 券商持仓：刷新查询一次（P12：缓存可能过时；P13：一次刷新查询无压力）
+- **[BREAK]**：本地成交与券商订单 dealt_qty / 均价不一致；券商有成交本地没有；本程序净持仓与「券商持仓 − 程序外部分」不一致（程序外部分 = 券商持仓 − 本程序净持仓的差异来源由报告列出，不自动归因）
+- **P&L**（逐标的，Decimal，输出时 ROUND_HALF_UP 到 0.01）：已实现按平均成本；未实现 =（收盘价 − 平均成本）× 持仓。收盘价：今天用收盘后快照 `last_price`（要求 `update_time` 为当天收盘时刻），上一个交易日用今天快照的 `prev_close_price`（最终值）；报告记下收盘价来源和取值时刻。券商 `today_pl_val` 只作参考列
+- **BrokerPort / MarketDataPort 补充**：`query_positions(refresh=False)` 加 refresh 参数（vendor § Get Positions › refresh_cache）；`Quote` 加 `prev_close`（快照 `prev_close_price`）；`MarketDataPort.close_time(d)` 按交易日历返回当天收盘时刻（WHOLE 16:00 / MORNING 13:00 / 非交易日 None；vendor § Get Trading Calendar）。FakeBroker 同步
+- **存储**：`db/migrations/0004_m7.sql` 新表 `eod_reports`（交易日、生成时刻、环境、汇总、breaks、逐标的行 JSONB；同一交易日可多次运行，只追加）；Store 加 `append_eod_report` / `eod_reports(trade_date)`（内存 + PG）
+- **文件**：`src/mooapp/eod/`（`pnl.py` 纯计算、`recon.py` 三方对账、`report.py` EodReport / CSV / 打印、`run.py` 组装 `run_eod`）、`ops/cli.py`（`mooapp eod [--date]`，退出码：0 无差异、非 0 有 BREAK）、`broker/port.py`、`broker/moomoo.py`、`broker/convert.py`、`broker/fake.py`、`broker/throttle.py`（转发新参数）、`oms/store.py`、`oms/pg_store.py`、`db/migrations/0004_m7.sql`、SPEC（接口列表）
+- **测试（先写、先失败）**：`test_eod_pnl.py`（构造数据手算到分：多笔买、部分卖、卖光、加仓后再卖、价格整除不尽，验收 1）；`test_eod_recon.py`（FakeBroker：一致、本地多一笔假成交 → BREAK、券商多成交、均价差、持仓差、程序外持仓不算 BREAK）；`test_eod_cli.py`（收盘前拒绝、日期范围、退出码）；store 契约 `eod_reports`（内存 + PG）；适配器传参（refresh、prev_close、交易日历）；验收 2、3 的草稿贴在聊天里，由你复制进 `tests/acceptance/`
+- **实测**：M7 完成后先补跑 `mooapp eod --date 2026-11-16`（第一轮实测，不计入验收）；之后每个交易日：盘中跑 M6 验收，收盘 30 分钟后 `mooapp eod`
+
 ## 修复计划（已确认 2026-11-16，分支 `fix/Post_Milestone_3`）
 
 周一验收中发现的两个问题。你的决定：计划 1 选 A（`min` 公式 + ADR-0031）；计划 2 照做；SPEC 由 Claude 改；**先做计划 2**。每份先提交失败的测试，再提交实现。
