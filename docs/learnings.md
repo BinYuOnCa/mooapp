@@ -331,7 +331,7 @@ App 里当天模拟账户的 5 张订单与录制一致（你 2026-11-13 核对�
 
 ## M3 OMS 核心：设计与实现中的发现（2026-11-13）
 
-探针 P9（DAY 单收盘过期、DELETED）只跑了第一次 `--check`（见本节末尾），过期结论要等 2026-11-16（周一）收盘后再查；在那之前 DISABLED、DELETED 按「映射不了」报警（docs/status-mapping.md）。
+探针 P9（DAY 单收盘过期、DELETED）：过期结论见本节末尾「P9 第二次 `--check`」（2026-11-16）：DAY 单过期显示为 CANCELLED_ALL。DISABLED 仍无样本，DELETED 未测，二者继续按「映射不了」报警（docs/status-mapping.md）。
 
 #### Moomoo 订单状态共 11 个，不是 12 个
 
@@ -387,14 +387,14 @@ App 里当天模拟账户的 5 张订单与录制一致（你 2026-11-13 核对�
   - 两份 M3 验收：异常发生在 `finally` 撤单，会盖掉 `try` 里断言的结果，这次不能算通过。券商数据和验收条件一致（841874 那个 cid 在券商端只有 1 张单；重启后本地 NEW 对应券商 SUBMITTED），但要周一常规时段单独重跑。建议你在 `finally` 里也处理撤单失败（例如记录后再抛），并在两份 M3 验收之前等满 31 秒，或单独运行
 - **更正**：之前我推测撤单失败是因为订单还在 PENDING_NEW、被闸门拒绝，这个推测是错的。事件记录显示闸门放行了撤单，是券商因额度用完而拒绝。「PENDING_NEW 时的撤单等确认后自动发」仍有意义（halt 时可能有单还没确认），但不是这次失败的原因
 
-#### P9 第一次 `--check`：收盘后下的 DAY 单排队到下一交易日，不会立即过期（P9 部分）
+#### P9 第一次 `--check`：收盘后下的 DAY 单 2 小时后仍是 SUBMITTED（P9 部分；「排队到下一交易日」的推测已被第二次查询推翻）
 
 - **结论**：841874、841875 下于美东 16:00:46、16:00:48，比收盘晚几十秒。美东 18:04 查询，两张单都是 `SUBMITTED`，`time_in_force=DAY`、`session=RTH`，最后更新时间仍是下单时刻。缓存查询（refresh_cache=False）和绕过缓存的查询结果相同。`history_order_list_query` 也能查到，状态同样是 `SUBMITTED`。这与 M1 的「夜盘时模拟盘照样接受常规时段的 DAY 单并排队」一致
 - **另外发现**：账户上一共挂着 10 张 `SUBMITTED` 单（841874–841883，16:00:46–16:00:50，US.SPY 限价买 1 股 @ 678.78，全带 `moo:` remark），都是这次 `pytest -m sim` 撤单失败留下的。只有 841874、841875 在 OMS 数据库里，另外 8 张来自直接调用 BrokerPort 的契约测试。你决定不撤：它们会排队到周一开盘、挂一整天、收盘时过期，周一收盘后再查，正好当 10 个 DAY 过期样本。价格比市价低 10%，正常不会成交。这 8 张本地没有记录的单，OMS 每次启动恢复都会报 `unknown_client_order_id`，这是预期行为
 - **依据**：实测
 - **出处**：vendor § Get open Orders、§ Get Historical Orders；`scripts/probe_m3_expiry.py` @ f6104e9（`--check` 模式）
 - **记录**：`recordings/probes/probe_m3_expiry_20261113T230431Z.jsonl`；运行时间 2026-11-13T23:04:31Z（美东 18:04）；SDK 10.12.7208，OpenD 1012
-- **待补**：周一（2026-11-16）美东 16:00 之后对 841874–841883 再跑一次 `--check`，看 DAY 单过期后显示什么状态（DISABLED？CANCELLED_ALL？），有没有推送；周二再查一次，看 24 小时后还能不能查到。之后再定 `mapping.py` 里 DISABLED 的映射。DELETED 需要你在 App 里删一张单再查
+- **已补**（见下一条）。原待补：周一（2026-11-16）美东 16:00 之后对 841874–841883 再跑一次 `--check`，看 DAY 单过期后显示什么状态（DISABLED？CANCELLED_ALL？），有没有推送；周二再查一次，看 24 小时后还能不能查到。之后再定 `mapping.py` 里 DISABLED 的映射。DELETED 需要你在 App 里删一张单再查
 
 ## M6a 规则引擎纯逻辑（2026-11-14）
 
@@ -511,3 +511,19 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
 - **结论**：halt 迟到也该执行，因为它只减少风险。`rule_cancel` 不同：入场单已成交时，取消规则会拿掉止损保护，迟到执行会在你不知情时让持仓失去保护。所以 `rule_add`、`rule_cancel` 和 `place`、`cancel` 一样，命令行超时即过期。规则 id 不能复用、同一标的只能有一条活动规则（ADR-0020），本来就防住了「重复添加」，过期解决的是「迟到」
 - **依据**：你 2026-11-14 的决定；`tests/unit/test_commands.py::test_rule_add_expires_when_cli_gave_up`、`test_rule_cancel_expires_when_cli_gave_up`（修复前失败）
 - **影响**：`ops/commands.py`
+
+#### P9 第二次 `--check`：收盘后下的 DAY 单在当天盘后时段结束时过期，状态 CANCELLED_ALL（更正第一次的推测）
+
+- **结论**：
+  - 841874–841883（周五美东 16:00:46–16:00:50 下单，DAY、session=RTH）全部是 `CANCELLED_ALL`，`updated_time` 都是 2026-11-13 20:01:00（美东），即周五盘后时段 20:00 结束后一分钟。第一次查询（18:04）看到 SUBMITTED，是因为还在盘后时段内；「排队到下一交易日」的推测是错的
+  - DAY 单过期和主动撤单显示同一个状态 `CANCELLED_ALL`，`dealt_qty=0`，没有单独的过期状态；DISABLED 在这次没有出现，仍无样本
+  - 前一天的订单，`order_list_query` 不论 `refresh_cache` 真假都返回空列表；只有 `history_order_list_query` 能查到。结束近 3 天（约 67 小时）后仍可在历史订单中查到
+  - 当天新下、已撤销的单（842592、842718）`history_order_list_query` 也能查到
+- **依据**：实测（2026-11-16 美东 10:29）；App 里模拟账户 ****4165 订单列表显示全部「已撤销」，与查询一致
+- **出处**：vendor § Get open Orders、§ Get Historical Orders；`scripts/probe_m3_expiry.py` @ a54bbc7（`--check` 模式）
+- **记录**：`recordings/probes/probe_m3_expiry_20261116T152905Z.jsonl`；运行时间 2026-11-16T15:29:05Z；SDK 10.12.7208，OpenD 1012
+- **影响**：
+  - `oms/mapping.py`：`CANCELLED_ALL` 映射为 CANCELED 已覆盖 DAY 过期，不需要新增状态；DISABLED、DELETED 仍按「映射不了」处理
+  - **OMS 启动恢复的缺口**：恢复只查 `order_list_query`，本地仍为 NEW 的前一天订单（841874、841875）查不到，只报 `missing_at_broker`，本地状态一直停在 NEW。后果：每次启动都报警；halt 会去撤它们并被券商拒绝；持仓上限把它们的剩余量算作挂单。待修：缺失订单再查 `history_order_list_query`，按实际状态结束（需要先出计划）
+  - 周一收盘后、周二的复查不再需要
+
