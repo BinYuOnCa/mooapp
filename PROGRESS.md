@@ -5,7 +5,7 @@
 **ADR-0030**（2026-11-14，你选 C）：`rule_add`、`rule_cancel` 也随命令行超时过期；halt、resume 不过期。`pytest` 759 passed，`pytest -m pg` 43 passed。命令行拿到 expired 结果时提示「命令已过期，未执行」（下单、撤单、规则命令都是），`pytest` 763 passed
 **M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
-**下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；P9 已有结论（见下方「P9 结论」）
+**下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
 
 ## 周一操作清单（2026-11-16）
 
@@ -126,8 +126,8 @@
 ! uv run pytest -m sim tests/acceptance/test_m4_halt.py
 ```
 - 过程：挂 3 张 SPY 买单 @ 最新价 × 0.9 → 全部确认后 halt → 3 张 CANCELED（券商 CANCELLED_ALL）→ 再下一单被 `halt` 拒绝
-- [ ] `1 passed`
-- [ ] App 里 3 张 SPY 单已撤销
+- [x] `1 passed`（2026-11-16 第二次运行。第一次被闸门以 `max_limit_deviation_pct` 拒绝：草稿用最新价 × 0.9，偏离 10% 超过模拟盘 5% 上限；你把系数改为 0.96 后通过）
+- [x] App 里 3 张 SPY 单已撤销
 - 预期：halt 结果里有 **2 张撤单失败**（841874、841875：本地还是 NEW，券商端周五已结束，撤单被拒），并报警 `halt_cancel_failed`；验收只看自己的 3 张，照样通过。启动时这两张还会报 `missing_at_broker`
 - 开头报「开始前不应处于 halt」：先做第 5 步再回来跑
 - 结束后 halt 保留，必须做第 5 步
@@ -138,17 +138,17 @@
 ```
 cd ~/GitRepos/mooapp && uv run mooapp run
 ```
-- [ ] 日志有「mooapp run 已启动（simulate）」
-- [ ] **没有**「没有 [resume] key」「读不到 secrets」之类的警告（有就是密钥没读到）
-- 8 条 `unknown_client_order_id`、2 条 `missing_at_broker`（841874、841875）是预期的
+- [x] 日志有「mooapp run 已启动（simulate）」
+- [x] **没有**「没有 [resume] key」「读不到 secrets」之类的警告（有就是密钥没读到）
+- 8 条 `unknown_client_order_id`、2 条 `missing_at_broker`（841874、841875）、若干 `external_order`（P10、契约测试的单不在本地库）是预期的
 
 窗口 B：
 ```
 cd ~/GitRepos/mooapp && uv run mooapp resume
 ```
-- [ ] 原样输入随机确认码后输出「已解除 halt」
+- [x] 原样输入随机确认码后输出「已解除 halt」（2026-11-16：你运行了几轮 run/resume；journal 显示 halt 16:35:12 UTC 已持久化，16:40:27 的第一次签名 resume（命令 7）解除，之后命令 8、9 是重复 resume）
 - 报「签名不对」或「已过期」：检查两个窗口读的是不是同一份 secrets
-- [ ] 窗口 A 按 **Ctrl-C** 停掉 `mooapp run`，确认正常退出
+- [x] 窗口 A 按 **Ctrl-C** 停掉 `mooapp run`，确认正常退出（uv 打印 `Failed to get PID of child process: ESRCH`：子进程已先退出，无影响；`pgrep -fl "mooapp run"` 无输出）
 
 （等 31 秒）
 
@@ -158,9 +158,9 @@ cd ~/GitRepos/mooapp && uv run mooapp resume
 ! uv run pytest -m sim tests/acceptance/test_m6_rule_oco.py -s
 ```
 - 过程：SPY 限价买 1 股 @ 卖一价 × 1.0005；止损 = 成本 − 0.05，止盈 = 成本 + 0.05；最长等 10 分钟
-- [ ] `1 passed`
-- [ ] 规则 CLOSED，只有 1 张卖单且已成交
-- [ ] 按输出的触发方向、卖单号、成交价到 App 核对；持仓恢复原状
+- [x] `1 passed`（2026-11-16，用时 20.64 秒；规则 accept-m6-1794847616）
+- [x] 规则 CLOSED，只有 1 张卖单且已成交
+- [x] 按输出的触发方向、卖单号、成交价到 App 核对；持仓恢复原状（take 触发：买入 11:46:57 成交 745.37，止盈线 745.42；卖单 843037 11:47:10 市价成交 745.49；App 两张均已成交）
 
 ### P9 结论（2026-11-16 美东 10:29 `--check`，收盘后和周二那次不用再跑）
 
@@ -168,6 +168,15 @@ cd ~/GitRepos/mooapp && uv run mooapp resume
 - 前一天的订单 `order_list_query`（缓存、刷新都）查不到，只有 `history_order_list_query` 能查到；结束近 3 天仍可查
 - 发现的缺口：启动恢复只查当日订单列表，本地仍为 NEW 的 841874、841875 不会被结束（只报 `missing_at_broker`）。验收跑完后由 Claude 出修复计划（缺失订单再查历史订单）
 - 记录：`recordings/probes/probe_m3_expiry_20261116T152905Z.jsonl`
+
+### 验收后待办（2026-11-16 新增）
+
+- [ ] 提交今天的文档和你改的 `tests/acceptance/test_m4_halt.py`
+- [ ] 打 tag：`/milestone-git finish 3` → `finish 4` → `finish 6`（顺序与时机由你定）
+- [ ] 修复计划 1：闸门可卖数量重复扣挂单（P10d；改动 M4 确认点 3，需要你确认，可能需要 ADR）
+- [ ] 修复计划 2：启动恢复对「本地未结束、当日订单列表查不到」的订单改查历史订单并按实际状态结束（P9；841874、841875 现在仍是本地 NEW）
+- [ ] 可选：美东 16:00 后再跑一次 P11 `uv run python scripts/probe_m6_quote.py`，看盘后 `last_price`、`open_price`
+- [ ] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `build_runtime`（你本人修改）
 
 ### 结果发给 Claude
 
