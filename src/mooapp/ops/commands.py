@@ -3,9 +3,10 @@
 - CommandClient（命令行进程）：不构造闸门、OMS、券商连接；常驻进程心跳过期时直接报错
 - CommandProcessor（常驻进程）：place / cancel / halt / resume 交给 RiskGate；其他 kind、或处理中抛出的异常，
   写回 error 状态和原因、记 ERROR 日志、发 Alert("command_error")，然后继续处理下一条（不吞错，也不让一条坏命令卡住队列）
+- M6b：rule_add（payload 为 YAML 原文）、rule_cancel 交给规则引擎（入场单、卖单、撤单仍经闸门）
 - 下单命令里的 client_order_id 由命令行生成（place_payload），同一条命令重试时沿用，靠 M3 的幂等保证只有 1 张单
 - 本模块不 import oms.executor（SPEC 3.3 规则 2），只调用 RiskGate
-- M4 审查 #7：place / cancel 带 expires_at（命令行等待的截止时间），过期才被取出的命令不交给闸门；
+- M4 审查 #7、ADR-0030：place / cancel / rule_add / rule_cancel 带 expires_at（命令行等待的截止时间），过期才被取出的命令不执行；
   启动时把上一个进程遗留的 running 命令标为 error
 - M4 审查 #10（ADR-0029）：resume 必须带 ops/resume_auth 的签名
 """
@@ -28,8 +29,8 @@ from mooapp.risk.gate import Intent, RiskGate
 log = logging.getLogger(__name__)
 HEARTBEAT_KEY = "runner_heartbeat"
 RESUME_NONCE_PREFIX = "resume_nonce:"  # kv：用过的 resume 随机数
-EXPIRING_KINDS = frozenset({"place", "cancel"})
-KINDS = frozenset({"place", "cancel", "halt", "resume"})
+EXPIRING_KINDS = frozenset({"place", "cancel", "rule_add", "rule_cancel"})  # halt、resume 不过期（ADR-0030）
+KINDS = frozenset({"place", "cancel", "halt", "resume", "rule_add", "rule_cancel"})
 
 
 class RunnerNotRunning(MooappError):
@@ -37,7 +38,7 @@ class RunnerNotRunning(MooappError):
 
 
 class CommandTimeout(MooappError):
-    """等待判定超时。下单、撤单命令过了截止时间才被处理时，常驻进程不再执行（结果为 expired）；halt 仍会执行。"""
+    """等待判定超时。下单、撤单、规则命令过了截止时间才被处理时，常驻进程不再执行（结果为 expired）；halt 仍会执行。"""
 
 
 # ------------------------------------------------------------------ 常驻进程一侧
@@ -46,11 +47,14 @@ class CommandTimeout(MooappError):
 class CommandProcessor:
     HEARTBEAT_TTL = 10.0  # 秒；常驻进程每秒写一次
 
-    def __init__(self, gate: RiskGate, store: Store, clock: Clock, bus: EventBus, resume_key: bytes | None = None):
+    def __init__(
+        self, gate: RiskGate, store: Store, clock: Clock, bus: EventBus, engine: Any = None, resume_key: bytes | None = None
+    ):
         self.gate = gate
         self.store = store
         self.clock = clock
         self.bus = bus
+        self.engine = engine  # M6b：strategy.engine.RuleEngine；不 import 具体类型，避免 ops 依赖 strategy 的实现细节
         self._resume_key = resume_key  # ADR-0029；None 时一律拒绝 resume
 
     def recover_orphans(self) -> int:
@@ -89,7 +93,7 @@ class CommandProcessor:
         if kind in EXPIRING_KINDS and expires is not None and self.clock.now() > datetime.fromisoformat(expires):
             log.warning("命令 %s 已过期（截止 %s），不执行", kind, expires)
             return {"allowed": False, "rule": "expired", "reason": f"命令行已在 {expires} 放弃等待，不再执行",
-                    "client_order_id": payload.get("client_order_id"), "status": None}  # fmt: skip
+                    "client_order_id": payload.get("client_order_id"), "rule_id": payload.get("rule_id"), "status": None}  # fmt: skip
         if kind == "place":
             try:
                 req = OrderRequest(
@@ -108,6 +112,13 @@ class CommandProcessor:
             cid = payload.get("client_order_id")
             d = self.gate.submit(Intent(Source.CLI, "cancel", client_order_id=cid, actor=actor))
             return _decision(d, cid)
+        if kind in ("rule_add", "rule_cancel"):
+            if self.engine is None:
+                raise RuntimeError("规则引擎未启用，不能处理规则命令")
+            if kind == "rule_add":
+                r = self.engine.add(str(payload.get("yaml") or ""), actor=actor)
+                return {"allowed": r.allowed, "rule_id": r.rule_id, "reason": r.reason, "entry_cid": r.entry_cid}
+            return self.engine.cancel(str(payload.get("rule_id")), actor=actor)
         if kind == "halt":
             r = self.gate.halt(str(payload.get("reason") or "手动 halt"), actor=actor)
             return {"halted": True, "cancel_sent": r.cancel_sent, "deferred": r.deferred, "failed": r.failed}
@@ -185,7 +196,7 @@ class CommandClient:
                     raise RuntimeError(f"命令 {command_id}（{c.kind}）处理出错：{result.get('error')}")
                 return result
             if self.clock.monotonic() >= deadline:
-                later = "下单、撤单命令过期后不会再执行" if c.kind in EXPIRING_KINDS else "常驻进程恢复后仍会执行"
+                later = "这条命令过期后不会再执行，请查询后再决定是否重发" if c.kind in EXPIRING_KINDS else "常驻进程恢复后仍会执行"
                 raise CommandTimeout(f"命令 {command_id}（{c.kind}）{self.timeout:g} 秒内没有结果（状态 {c.status}）；{later}")
             self.clock.sleep(self.poll_interval)
 

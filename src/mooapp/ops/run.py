@@ -1,8 +1,8 @@
 """常驻进程 `mooapp run` 的组装与生命周期（SPEC 3.4；M4 计划设计要点；M4 验收草稿使用 build_runtime）。
 
 - 只有常驻进程构造 RiskGate、OMS、Executor 和券商连接，并持有单实例锁（PostgreSQL advisory lock，按 schema 区分）
-- 启动：拿锁 → 事件线程 → 启动恢复（完成前闸门拒绝新单）→ 轮询 → 遗留命令标 error → 心跳线程（每秒，独立于命令处理）
-  → 命令线程（LISTEN mooapp_commands 唤醒，另有 1 秒轮询兜底；LISTEN 出错也只报警、继续）
+- 启动：拿锁 → 事件线程 → 恢复规则（M6b）→ OMS 启动恢复（完成前闸门拒绝新单）→ 轮询 → 遗留命令标 error
+  → 心跳线程（每秒，独立于命令处理）→ 命令线程（LISTEN mooapp_commands 唤醒，另有 1 秒轮询兜底；LISTEN 出错也只报警、继续）
 - 停止：停命令线程、轮询、事件线程 → 上锁（ADR-0015，模拟盘下无操作）→ 关券商连接 → 释放单实例锁 → 关数据库连接
 - 本模块只负责组装：不调用 place_order / cancel_order，也不调用 Executor 的写方法（tests/unit/test_write_path.py）
 - REAL：M4 仍关闭（确认点 4），build_runtime 直接拒绝
@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +59,7 @@ class Runtime:
     executor: Executor
     gate: RiskGate
     processor: CommandProcessor
+    engine: Any = None  # M6b：strategy.engine.RuleEngine（启动时先恢复规则，再做 OMS 启动恢复）
     listen: Callable[[float], bool] | None = None  # 等待新命令通知，最多等 timeout 秒；None 时只靠轮询
     closers: list[Callable[[], None]] = field(default_factory=list)
     _stop: threading.Event = field(default_factory=threading.Event)
@@ -71,6 +73,9 @@ class Runtime:
             raise RunnerAlreadyRunning("另一个 mooapp run 正在运行（单实例锁被占用）")
         self._locked = True
         self.pump.start()
+        if self.engine is not None:
+            self.engine.start()  # 规则动作线程：闸门调用不在事件线程上（M6b 审查修复 #1）
+            self.engine.recover()  # 先恢复规则：OMS 启动恢复产生的 OrderChanged 会补喂停机期间的成交
         self.oms.recover()
         self.poller.start()
         self.processor.recover_orphans()  # 已持有单实例锁：running 的命令只可能是上一个进程留下的
@@ -102,6 +107,8 @@ class Runtime:
     def _command_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                if self.engine is not None:
+                    self.engine.poll_stale_quotes()  # 行情兜底（只排队，由事件线程执行）
                 while not self._stop.is_set() and self.processor.process_one():
                     pass
                 if self.listen is not None:
@@ -131,6 +138,8 @@ class Runtime:
         if self._hb_thread is not None:
             step("心跳线程", lambda: self._hb_thread.join(5.0) if self._hb_thread else None)
         step("轮询", self.poller.stop)
+        if self.engine is not None:
+            step("规则动作线程", self.engine.stop)
         step("事件线程", self.pump.stop)
         step("上锁", self._relock)
         step("券商连接", self.broker.close)
@@ -194,7 +203,13 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
             env=env, limits=limits, oms=oms, executor=executor, md=broker, store=jstore, bus=bus, clock=clock,  # type: ignore[arg-type]
             stale_after_seconds=float(settings.quote.stale_after_seconds),
         )  # fmt: skip
-        processor = CommandProcessor(gate=gate, store=jstore, clock=clock, bus=bus, resume_key=_resume_key())  # type: ignore[arg-type]
+        from mooapp.strategy.engine import RuleEngine
+
+        engine = RuleEngine(
+            gate=gate, oms=oms, store=jstore, md=broker, bus=bus, clock=clock, pump=pump,  # type: ignore[arg-type]
+            poll_fallback_seconds=float(settings.quote.poll_fallback_seconds), threaded_actions=True,
+        )  # fmt: skip
+        processor = CommandProcessor(gate=gate, store=jstore, clock=clock, bus=bus, engine=engine, resume_key=_resume_key())  # type: ignore[arg-type]
 
         listen_conn = psycopg.connect(dsn, autocommit=True)
         closers.append(listen_conn.close)
@@ -211,7 +226,7 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
         raise
     return Runtime(
         env=env, clock=clock, broker=broker, md=broker, store=store, bus=bus, oms=oms, pump=pump, poller=poller,  # type: ignore[arg-type]
-        executor=executor, gate=gate, processor=processor, listen=listen, closers=closers,
+        executor=executor, gate=gate, processor=processor, engine=engine, listen=listen, closers=closers,
     )  # fmt: skip
 
 

@@ -203,7 +203,15 @@ def _submit(ctx: typer.Context, kind: str, payload: dict, actor: str = "cli") ->
         store.close()
 
 
+def _exit_if_expired(r: dict) -> None:  # type: ignore[type-arg]
+    """常驻进程取出命令时已过了命令行的截止时间（M4 审查 #7、ADR-0030）：没有执行，不是闸门拒绝。"""
+    if r.get("rule") == "expired":
+        typer.echo(f"命令已过期，未执行：{r.get('reason')}。请查询后再决定是否重发", err=True)
+        raise typer.Exit(EXIT_COMMAND)
+
+
 def _echo_decision(r: dict) -> None:  # type: ignore[type-arg]
+    _exit_if_expired(r)
     if r.get("allowed"):
         typer.echo(f"已受理：{r.get('client_order_id')}（{r.get('status') or r.get('reason')}）")
     else:
@@ -323,3 +331,106 @@ def run(ctx: typer.Context) -> None:
             typer.echo("收到 Ctrl-C，正在退出")
     finally:
         rt.stop()
+
+
+# ------------------------------------------------------------------ M6a：规则文件检查与 dry-run（纯本地，不连 OpenD、不连数据库）
+
+rule_app = typer.Typer(
+    help="止损止盈规则（M6）：check 校验；dry-run 回放；add / cancel 经常驻进程执行；list 只读。", no_args_is_help=True
+)
+app.add_typer(rule_app, name="rule")
+
+
+@rule_app.command("check")
+def rule_check(path: Path) -> None:
+    """校验规则文件（YAML + JSON Schema + 表达式白名单），不建规则。"""
+    from mooapp.strategy.spec import RuleSpecError, load_rule_file
+
+    try:
+        spec = load_rule_file(path)
+    except RuleSpecError as e:
+        typer.echo(f"规则不合法：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    typer.echo(
+        f"规则 {spec.id} 合法：{spec.symbol} 限价买 {spec.entry.qty} 股 @{spec.entry.limit_price}；"
+        f"止损 {spec.stop_src}；止盈 {spec.take_src}"
+    )
+
+
+@rule_app.command("dry-run")
+def rule_dry_run(path: Path, prices: Annotated[Path, typer.Option("--prices", help="价格文件 CSV：ts,type,a,b")]) -> None:
+    """用价格文件回放规则，打印何时触发什么（ADR-0005、0007、0008、0009、0027）。"""
+    from mooapp.strategy.dryrun import DryRunError, dry_run, format_events, parse_prices
+    from mooapp.strategy.spec import RuleSpecError, load_rule_file
+
+    try:
+        spec = load_rule_file(path)
+        rows = parse_prices(prices.read_text(encoding="utf-8"))
+    except (RuleSpecError, DryRunError) as e:
+        typer.echo(f"输入不合法：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    except OSError as e:
+        typer.echo(f"读不了价格文件 {prices}：{e.strerror or e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    typer.echo(format_events(dry_run(spec, rows)))
+
+
+@rule_app.command("add")
+def rule_add(ctx: typer.Context, path: Path) -> None:
+    """添加规则：先在本地校验，再写入命令表，由 mooapp run 下入场单并开始监控（M6b）。"""
+    from mooapp.strategy.spec import RuleSpecError, load_rule
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        load_rule(text)
+    except RuleSpecError as e:
+        typer.echo(f"规则不合法：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    except OSError as e:
+        typer.echo(f"读不了规则文件 {path}：{e.strerror or e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    r = _submit(ctx, "rule_add", {"yaml": text})
+    _exit_if_expired(r)
+    if r.get("allowed"):
+        typer.echo(f"规则 {r['rule_id']} 已添加，入场单 {r['entry_cid']}")
+    else:
+        typer.echo(f"规则未添加：{r.get('reason')}", err=True)
+        raise typer.Exit(EXIT_COMMAND)
+
+
+@rule_app.command("cancel")
+def rule_cancel(ctx: typer.Context, rule_id: str) -> None:
+    """取消规则：撤入场单余量、停止监控；还有持仓时提示不再受保护（M6b 默认做法 3）。"""
+    r = _submit(ctx, "rule_cancel", {"rule_id": rule_id})
+    _exit_if_expired(r)
+    typer.echo(f"规则 {rule_id}：{r.get('status')}")
+    if r.get("unprotected_qty"):
+        typer.echo(f"注意：持仓 {r['unprotected_qty']} 股不再受止损止盈保护", err=True)
+
+
+@rule_app.command("list")
+def rule_list(ctx: typer.Context, all_: Annotated[bool, typer.Option("--all", help="包含已结束的规则")] = False) -> None:
+    """列出规则（只读，直接读数据库）。"""
+    from mooapp.oms.pg_store import PostgresStore
+
+    env: Env = ctx.obj
+    try:
+        dsn = _dsn(env)
+    except ConfigError as e:
+        typer.echo(f"配置错误：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    other = _SCHEMA[Env.REAL if env is Env.SIMULATE else Env.SIMULATE]
+    store = PostgresStore(dsn, schema=_SCHEMA[env], other_schema=other)
+    try:
+        rules = store.list_rules(active_only=not all_)
+    finally:
+        store.close()
+    if not rules:
+        typer.echo("（没有规则）")
+        return
+    for r in rules:
+        st = r.state
+        typer.echo(
+            f"{r.id:<20} {r.symbol:<8} {r.status:<9} 止损 {st.get('stop_price') or '-':<8} 止盈 {st.get('take_price') or '-':<8} "
+            f"买 {st.get('bought', 0)} 卖 {st.get('sold', 0)}"
+        )

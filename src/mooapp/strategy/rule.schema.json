@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mooapp.local/schemas/rule.schema.json",
+  "title": "mooapp 止损止盈规则（M6；ADR-0004、0005、0009、0027）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "symbol", "entry", "stop", "take"],
+  "properties": {
+    "id": {
+      "description": "规则 id：小写字母、数字、- 和 _，1–64 个字符",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "symbol": {
+      "description": "只做美股（ADR-0001），moomoo 代码格式 US.XXX",
+      "type": "string",
+      "pattern": "^US\\.[A-Z0-9][A-Z0-9.\\-]*$"
+    },
+    "entry": {
+      "description": "入场单：只允许限价 DAY 买入（ADR-0004）",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["side", "qty", "limit_price"],
+      "properties": {
+        "side": { "const": "BUY" },
+        "qty": { "type": "integer", "minimum": 1 },
+        "limit_price": {
+          "description": "写成字符串，避免浮点误差；必须落在最小变动单位上（ADR-0009：不自动取整）",
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+        }
+      }
+    },
+    "stop": {
+      "description": "止损价表达式（白名单：open、avg_cost、last、min、max、round_tick、+ - * /）",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "take": {
+      "description": "止盈价表达式（同上）",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    }
+  }
+}

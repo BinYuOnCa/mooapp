@@ -193,3 +193,18 @@ def test_bad_intents_rejected_and_audited(bad):
     d = sys.gate.submit(bad)
     assert not d.allowed and d.rule == "bad_intent"
     assert sys.store.audit_records()[-1].rule == "bad_intent"
+
+
+def test_active_rule_check_skips_the_rule_own_entry():
+    """M6b：ADR-0020 的检查不拦规则自己的入场单（Intent 带 rule_id）。"""
+    from mooapp.oms.store import RuleRecord
+
+    sys = make_system()
+    t = sys.clock.now()
+    with sys.store.transaction():
+        sys.store.insert_rule(RuleRecord("r1", "US.SPY", "id: r1\n", "PENDING", "e" * 32, {}, "cli", t, t))
+    req = OrderRequest(new_client_order_id(), "US.SPY", Side.BUY, 1, OrderKind.LIMIT, Decimal("10"))
+    assert sys.gate.submit(Intent(Source.RULE, "place", request=req, actor="rule:r1", rule_id="r1")).allowed
+    req2 = OrderRequest(new_client_order_id(), "US.SPY", Side.BUY, 1, OrderKind.LIMIT, Decimal("10"))
+    d = sys.gate.submit(Intent(Source.RULE, "place", request=req2, actor="rule:r2", rule_id="r2"))
+    assert not d.allowed and d.rule == "active_rule"

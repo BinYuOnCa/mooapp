@@ -1,7 +1,282 @@
 # PROGRESS
 
-**当前**：M4 第 3 步完成（2026-11-14，分支 `dev/milestone_4`）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
-**下一步**（周一常规时段，你用 `!` 运行，各项之间间隔 31 秒）：先做 M3 的事项（见「待你处理」）→ `! uv run mooapp db migrate`（执行 0002）→ 探针 P10 → `pytest -m sim` → M4 验收 `tests/acceptance/test_m4_halt.py` → 结束后 `! uv run mooapp resume`
+**当前（M6b，分支 `dev/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
+**M4 审查修复已合并进本分支**（2026-11-14，fb1580e、4edf086）：解决了 7 个文件的冲突（规则引擎和 resume 签名共用 `CommandProcessor`；`poll_stale_quotes` 留在命令线程，心跳改为独立线程）。`pytest` 755 passed，`pytest -m pg` 43 passed；常驻进程和规则引擎的线程测试连跑 5 次都通过
+**ADR-0030**（2026-11-14，你选 C）：`rule_add`、`rule_cancel` 也随命令行超时过期；halt、resume 不过期。`pytest` 759 passed，`pytest -m pg` 43 passed。命令行拿到 expired 结果时提示「命令已过期，未执行」（下单、撤单、规则命令都是），`pytest` 763 passed
+**M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
+**M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
+**下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
+
+## 周一操作清单（2026-11-16）
+
+### 先确认的重点
+
+1. ~~**M4 验收的 halt 会撤掉 841874、841875**~~（已过时：P9 查明它们周五 20:01 已被券商结束，见「P9 结论」）：这两张在本地数据库里、状态 NEW，halt 撤本程序所有挂单；DAY 过期样本只剩 841876–841883（不在本地库，halt 不碰）。你已确认接受（2026-11-14，选 A），8 张样本够用
+2. **两份验收会自己启动常驻进程并占单实例锁**：跑验收时 `mooapp run` 必须是停着的；只有解除 halt（第 5 步）时才开
+3. **`mooapp run` 和 `mooapp resume` 在你自己的终端窗口里运行**，不用 `!`：前者是常驻进程；后者要求交互终端输入确认码
+4. 每个连 OpenD 的步骤之间等满 **31 秒**（限频按账户算）；全程不用 `--env real`
+5. 两份 M3 验收分开跑；M2 契约测试不在 M3 分支跑（M3 的限流器按实例计数），放到 dev/milestone_6 上（0.6）
+6. M3 验收的 `finally` 撤单失败会盖掉断言结果；要加处理由你本人改 `tests/acceptance/`。真失败时先看报错是不是 `high frequency`
+
+### 时间安排（美东）
+
+- 9:30 前：第 0 步 doctor、0.1、0.2
+- 9:30 后：0.3 → 0.4 → 0.5 → 第 1 步 → 第 2 步 → 第 3 步 → 0.6 → 第 4 步 → 第 5 步 → 第 6 步（每步间隔 31 秒，合计约 30 分钟；第 6 步不要晚于 15:45 开始）
+- 16:00 后：P9 `--check`
+
+### 第 0 步：开盘前检查
+
+```
+! git branch --show-current
+! uv run mooapp doctor
+```
+- [x] doctor 各项通过、OpenD 在线；没有在运行的 `mooapp run`
+
+### 第 0 步之 M3（dev/milestone_3）
+
+**0.1 切换分支（开盘前）**
+```
+! git status --short                 # 应为空
+! git switch dev/milestone_3
+! git log --oneline -1               # 应为 a54bbc7
+```
+- [x] 工作区干净，在 dev/milestone_3
+
+**0.2 数据库迁移（不连 OpenD）**
+```
+! uv run mooapp db migrate
+```
+- [x] 只涉及 `0001_oms.sql`（多半已执行，输出「没有要执行的迁移」）；0002、0003 留到第 1 步
+
+**0.3 M3 验收 4：同一 client_order_id 重试 3 次（常规时段）**
+```
+! uv run pytest -m sim tests/acceptance/test_m3_idempotent_retry.py -s
+```
+- 过程：SPY 限价买 1 股 @ 最新价 × 0.9（不会成交），同一 cid 提交 3 次，最后撤单
+- [x] `1 passed`（订单 842592）
+- [x] App 里只有 **1 张**新的 SPY 买单，已撤销
+- 报 `high frequency`：额度被占（App 同时操作、别的进程连着 OpenD），等 31 秒单独重跑
+
+（等 31 秒）
+
+**0.4 M3 验收 3：下单后杀进程、重启恢复（常规时段）**
+```
+! uv run pytest -m sim tests/acceptance/test_m3_restart_recovery.py -s
+```
+- 过程：子进程下单后 `os._exit(9)`；父进程重建 OMS、启动恢复、与券商对比，最后撤单
+- [x] `1 passed`（订单 842718，本地 NEW / 券商 SUBMITTED）
+- [x] 输出「请在 App 里核对订单 <号>：本地 NEW，券商 SUBMITTED」（或 PENDING_NEW/SUBMITTING、UNKNOWN/SUBMITTING）
+- [x] **App 目视核对**：这张单存在、只有 1 张、随后被撤销（验收 3 要求你亲自对照）
+- 预期有 `unknown_client_order_id` 报警（那 8 张没有本地记录的单），不影响结果
+
+（等 31 秒）
+
+**0.5 切回 dev/milestone_6**
+```
+! git switch dev/milestone_6
+! git log --oneline -1
+```
+- [x] 切换成功，工作区干净
+
+**0.6 M2 契约测试（dev/milestone_6，常规时段；排在第 3 步之后、第 4 步之前）**
+```
+! uv run pytest -m sim tests/contract
+```
+- [x] 全部通过（2026-11-16：15 passed，用时 4 分 42 秒，无限频报错；按账户共用的限流器生效。实际排在第 1 步之后、P10 之前跑）；其中限流验收连下 20 单再全撤，之后**等满 31 秒**再做下一步
+- 失败且是 `high frequency`：按账户共用的限流器还有漏洞，把输出发给 Claude
+
+### 第 1 步：数据库迁移（不连 OpenD）
+
+```
+! uv run mooapp db migrate
+```
+- [x] 执行了 `0002_m4.sql` 和 `0003_m6.sql`；再跑一次应没有新迁移
+- 后面所有步骤都依赖这一步建的 commands、audit、rules 表
+
+### 第 2 步：探针 P10（常规时段）
+
+```
+! uv run python scripts/probe_m4_pnl.py
+```
+- 副作用：买 1 股 SPY（期望立即成交）→ 挂最新价 × 1.10 的卖单，查持仓后撤掉 → 市价卖 1 股，恢复原持仓
+- [x] 退出码 0，stderr 没有 `# 失败：`
+- [x] `p10.before`、`after_buy`、`after_sell` 的 `today_pl_val` 都是**数值**，`sum_today_pl_val` 不是「无法求和」
+- [x] `p10.with_open_sell`：SPY 的 `can_sell_qty` 是否比 `qty` 少 1 → **是**（qty 1、can_sell 0）：闸门会重复扣，验收后出修复计划（learnings「M4 探针 P10」）
+- [x] App 里没有残留的 probe 挂单
+- `today_pl_val` 无效：闸门会拒绝所有买单，第 4、6 步必然失败 → **停下**，把结果发给 Claude
+- `can_sell_qty` 已扣掉挂着的卖单：闸门的可卖数量规则会重复扣，需要修，但不影响今天的验收
+- 把 `recordings/probes/probe_m4_pnl_<UTC>.jsonl` 的路径发给 Claude（按 7.2 格式写进 learnings）
+
+（等 31 秒）
+
+### 第 3 步：探针 P11（常规时段）
+
+```
+! uv run python scripts/probe_m6_quote.py
+```
+- [x] 退出码 0，记录文件已生成
+- 要回答：报价推送频率、时间戳时区、`open_price` 取值；可选：16:00 后再跑一次，对照盘后 `last_price`
+- 把记录文件路径发给 Claude
+
+（等 31 秒）→ 0.6 契约测试 →（等 31 秒）
+
+### 第 4 步：M4 验收（常规时段，`mooapp run` 停着）
+
+```
+! uv run pytest -m sim tests/acceptance/test_m4_halt.py
+```
+- 过程：挂 3 张 SPY 买单 @ 最新价 × 0.9 → 全部确认后 halt → 3 张 CANCELED（券商 CANCELLED_ALL）→ 再下一单被 `halt` 拒绝
+- [x] `1 passed`（2026-11-16 第二次运行。第一次被闸门以 `max_limit_deviation_pct` 拒绝：草稿用最新价 × 0.9，偏离 10% 超过模拟盘 5% 上限；你把系数改为 0.96 后通过）
+- [x] App 里 3 张 SPY 单已撤销
+- 预期：halt 结果里有 **2 张撤单失败**（841874、841875：本地还是 NEW，券商端周五已结束，撤单被拒），并报警 `halt_cancel_failed`；验收只看自己的 3 张，照样通过。启动时这两张还会报 `missing_at_broker`
+- 开头报「开始前不应处于 halt」：先做第 5 步再回来跑
+- 结束后 halt 保留，必须做第 5 步
+
+### 第 5 步：解除 halt（你自己的终端）
+
+窗口 A：
+```
+cd ~/GitRepos/mooapp && uv run mooapp run
+```
+- [x] 日志有「mooapp run 已启动（simulate）」
+- [x] **没有**「没有 [resume] key」「读不到 secrets」之类的警告（有就是密钥没读到）
+- 8 条 `unknown_client_order_id`、2 条 `missing_at_broker`（841874、841875）、若干 `external_order`（P10、契约测试的单不在本地库）是预期的
+
+窗口 B：
+```
+cd ~/GitRepos/mooapp && uv run mooapp resume
+```
+- [x] 原样输入随机确认码后输出「已解除 halt」（2026-11-16：你运行了几轮 run/resume；journal 显示 halt 16:35:12 UTC 已持久化，16:40:27 的第一次签名 resume（命令 7）解除，之后命令 8、9 是重复 resume）
+- 报「签名不对」或「已过期」：检查两个窗口读的是不是同一份 secrets
+- [x] 窗口 A 按 **Ctrl-C** 停掉 `mooapp run`，确认正常退出（uv 打印 `Failed to get PID of child process: ESRCH`：子进程已先退出，无影响；`pgrep -fl "mooapp run"` 无输出）
+
+（等 31 秒）
+
+### 第 6 步：M6 验收（常规时段，不处于 halt，`mooapp run` 停着）
+
+```
+! uv run pytest -m sim tests/acceptance/test_m6_rule_oco.py -s
+```
+- 过程：SPY 限价买 1 股 @ 卖一价 × 1.0005；止损 = 成本 − 0.05，止盈 = 成本 + 0.05；最长等 10 分钟
+- [x] `1 passed`（2026-11-16，用时 20.64 秒；规则 accept-m6-1794847616）
+- [x] 规则 CLOSED，只有 1 张卖单且已成交
+- [x] 按输出的触发方向、卖单号、成交价到 App 核对；持仓恢复原状（take 触发：买入 11:46:57 成交 745.37，止盈线 745.42；卖单 843037 11:47:10 市价成交 745.49；App 两张均已成交）
+
+### P9 结论（2026-11-16 美东 10:29 `--check`，收盘后和周二那次不用再跑）
+
+- 841874–841883 全部 `CANCELLED_ALL`，`updated_time` 2026-11-13 20:01:00（周五盘后时段结束时过期）；周五「排队到下一交易日」的推测是错的（learnings 已更正）
+- 前一天的订单 `order_list_query`（缓存、刷新都）查不到，只有 `history_order_list_query` 能查到；结束近 3 天仍可查
+- 发现的缺口：启动恢复只查当日订单列表，本地仍为 NEW 的 841874、841875 不会被结束（只报 `missing_at_broker`）。验收跑完后由 Claude 出修复计划（缺失订单再查历史订单）
+- 记录：`recordings/probes/probe_m3_expiry_20261116T152905Z.jsonl`
+
+### 验收后待办（2026-11-16 新增）
+
+- [ ] 提交今天的文档和你改的 `tests/acceptance/test_m4_halt.py`
+- [ ] 打 tag：`/milestone-git finish 3` → `finish 4` → `finish 6`（顺序与时机由你定）
+- [ ] 修复计划 1：闸门可卖数量重复扣挂单（P10d；改动 M4 确认点 3，需要你确认，可能需要 ADR）
+- [ ] 修复计划 2：启动恢复对「本地未结束、当日订单列表查不到」的订单改查历史订单并按实际状态结束（P9；841874、841875 现在仍是本地 NEW）
+- [ ] 可选：美东 16:00 后再跑一次 P11 `uv run python scripts/probe_m6_quote.py`，看盘后 `last_price`、`open_price`
+- [ ] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `build_runtime`（你本人修改）
+
+### 结果发给 Claude
+
+- 0.3、0.4、0.6、第 2–6 步的结果行（passed / failed），失败附关键报错；0.4 的订单号和 App 核对结果
+- P10、P11 的记录文件路径
+- 通过后：`/milestone-git finish 3`（可当天，也可等 M4、M6 一起）；之后你本人把两份 M3 验收的 `build()` 改用 `build_runtime`
+
+## M6b 审查修复（已确认 2026-11-14，分支 `dev/milestone_6`）
+
+`/code-review high` 有 10 条发现，加上附带的 2 条小问题，逐条核实都成立；你选择全部修复。每条先写能复现问题的测试，确认失败后再修：
+
+1. 死锁、事件线程被阻塞：规则引擎不再在事件线程上调用闸门。下单、撤单、时段查询、快照交给专门的动作线程，结果排回事件线程；`rule add` 和 `rule cancel` 在调用方线程上调用闸门
+2. 保护性卖单被撤销或过期（例如被 halt 撤掉）时，按被拒处理：剩余数量在下一笔行情重试
+3. 调用闸门出错时，按卖单失败计入；`rule add` 出错时规则作废，不留下活动规则
+4. 恢复时按闸门当前的 halt 状态，明确设置暂停或恢复
+5. OMS 就绪（`OmsReady` 事件）之前，状态机的动作先排队，就绪后再执行
+6. 同一标的只订阅一次；不再有活动规则、且订阅满 1 分钟的标的退订
+7. 时段缓存跨过美东 9:30 和 16:00 时立即失效；查询失败也缓存几秒
+8. 快照兜底失败时，同一标的 1 分钟内只报警一次
+9. 加载失败的规则在库里标为 ERROR；`rule cancel` 对没加载成功的规则直接把库里标为 CANCELED
+10. `_persist` 改用深拷贝；CANCELED 状态下的入场成交也报警「不受保护」
+
+## M6b 计划（已确认 2026-11-14，分支 `dev/milestone_6`）
+
+目标：SPEC 8 节 M6 验收 3（模拟盘买 1 股，设很窄的止损止盈，观察一边触发后另一边作废）。代码和测试周末用 FakeBroker 加 PostgreSQL 完成；探针 P11 和验收 3 在开盘时由你运行。
+
+### 你确认的点（2026-11-14，包括默认做法 4 条）
+
+1. 只在常规时段判断触发：`market_state` 不是 AFTERNOON 时忽略行情，结果缓存 30 秒。隔夜跳空的情况，开盘后第一笔行情立即触发（ADR-0003、0007）
+2. 停机重启后，规则从数据库恢复并继续监控，不需要重新 `rule add`
+3. 增加 `mooapp rule cancel <id>`：撤入场单余量、停止监控；还有持仓时提示「N 股不再受保护」
+4. 你手动卖掉规则管理的持仓时不额外处理：触发时卖单被闸门以可卖数量不足拒绝，3 次后进入 ERROR 并报警
+
+### 设计要点
+
+- `strategy/engine.py` RuleEngine，跑在事件线程上：
+  - add：检查 ADR-0020 → 写 rules 表（PENDING）→ 经闸门下入场单（来源为规则引擎，带 rule_id）→ 订阅行情
+  - OMS 新发 `OrderChanged` 事件，引擎按 client_order_id 找到规则，把成交、结束、被拒喂给状态机
+  - 卖出经闸门发市价单并带 protective 标记；被拒时调用 `on_sell_rejected`，下一笔行情重试
+  - 每次状态变化写回状态快照和 `rule_events`；halt 时暂停
+- 成交按订单累计量算增量，并记录已计入的数量和金额：推送、恢复补喂重复到达也不会重复计
+- 行情：BrokerPort 补上 `subscribe_quotes`（Moomoo 订阅 `SubType.QUOTE`，vendor § Subscribe、§ Real-time Quote Callback；FakeBroker 加 `push_quote`）；推送只排进事件队列；某个标的超过 `poll_fallback_seconds` 没有推送就用快照补
+- 数据库 `0003_m6.sql`：`rules`、`rule_orders`、只追加的 `rule_events`；`active_rule_for` 返回真实结果
+- 闸门：Intent 增加 `rule_id`，ADR-0020 的检查不拦规则自己的入场单
+- 命令：`rule add <yaml>`（命令行先本地校验，再把 YAML 原文写进命令表）、`rule cancel <id>`、`rule list`（只读）
+- 启动恢复：引擎先从快照恢复规则，再由 OMS 做启动恢复；停机期间的成交经 `OrderChanged` 补喂；重新订阅行情
+- 探针 P11 `scripts/probe_m6_quote.py`：推送频率、`data_time` 的时区、`open_price` 什么时候有值、盘前盘后的 `last_price` 是不是常规时段的价格
+
+### 文件
+
+- 新增：`strategy/engine.py`、`db/migrations/0003_m6.sql`、`scripts/probe_m6_quote.py`；测试 `test_rule_engine.py`、`test_rule_recovery.py`、`test_quote_feed.py`
+- 修改：`strategy/machine.py`（状态快照、CANCELED）、`oms/oms.py`（OrderChanged）、Store 两个实现、broker 层（subscribe_quotes）、`risk/gate.py`、`risk/rules.py`、`ops/commands.py`、`ops/run.py`、`ops/cli.py`；补充 `test_commands`、`test_store_contract`、`test_gate_m4`、`test_rule_machine`、`test_cli_m4`；收尾时改 learnings 和 PROGRESS
+- 不改：风控限额、`tests/acceptance/`、`.claude/`；没有新依赖
+
+### 执行顺序
+
+1. 计划写进 PROGRESS（已完成）
+2. 写测试，跑一遍确认失败，原样贴出结果，同时贴验收 3 的草稿（做法 C）；**停下等你确认**
+3. 写实现，直到 `pytest` 和 `pytest -m pg` 都通过
+4. 开盘时你依次运行：探针 P11 → 验收 3（与其他 sim 测试间隔 31 秒）
+5. `/milestone-git commit 6`
+
+## M6a 计划（已确认 2026-11-14，分支 `dev/milestone_6`，从 `dev/milestone_4` 拉出）
+
+目标：SPEC 8 节 M6 的验收 1（5 条价格路径与你手算一致）和验收 2（非法表达式在加载时被拒）。只做纯逻辑部分，不需要实时行情和数据库。验收 3（模拟盘一边触发后另一边作废）放到 M6b。M5 跳过，M6 不依赖它。
+
+### 你确认的点
+
+1. K 线时段里两边都碰到时，按止盈算（ADR-0027 第 2 条）
+2. 触发时先撤掉入场单余量，再卖出已成交的数量；撤单前又成交的部分补卖（ADR-0027 第 3 条）
+3. 卖单被拒绝：下一笔行情时同一边条件仍成立就重发；价格回到两个触发价之间就重新监控；累计失败 3 次进入 ERROR（ADR-0027 第 4 条）
+4. 依赖：PyYAML 6.0.3、jsonschema 4.26.0（SPEC Q13 已批准，2026-11-14 安装）
+
+### 设计要点
+
+- 规则文件：YAML 加 JSON Schema，字段为 `id`、`symbol`、`entry{side: BUY, qty, limit_price}`、`stop`、`take`；不允许多余字段，限价用字符串写；加载时编译两个表达式
+- 表达式：基于 `ast` 白名单，不使用 eval；只允许 `open`、`avg_cost`、`last`、`min`、`max`、`round_tick(x, "up"|"down")`、`+ - * /`、负号、数字；全部用 Decimal；长度不超过 200 个字符
+- 取整：复用 `broker/port.py` 的最小变动单位；止损价向上、止盈价向下（ADR-0009）
+- 状态机（纯逻辑，输入事件、输出动作）：PENDING → ARMED → TRIGGERED → CLOSED，另有 VOID、ERROR；首次成交时冻结价格（ADR-0005、0027 第 5 条）；冻结时已越过就立即触发（ADR-0007）；入场单过期按 ADR-0023；halt 期间暂停
+- dry-run：`mooapp rule dry-run <yaml> --prices <csv>`，CSV 列为 `ts,type,a,b`，type 取 `open | fill | tick | bar | reject_next_sell | expire`；卖单默认按触发时看到的价格成交，并打印滑点。另有 `mooapp rule check <yaml>`（只校验）
+
+### 价格路径（入场买 10 股 @100.21，开盘价 99.99，首次成交价 100.21）
+
+- 止损价 = min(99.99, 100.21) × 0.95 = 94.9905，向上取整为 95.00；止盈价 = max(99.99, 100.21) × 1.05 = 105.2205，向下取整为 105.22
+- 1 先止损（tick 99.00 → 95.01 → 95.00）；2 先止盈（103.00 → 105.21 → 105.22）；3 跳空越过止损（98.00 → 92.50，滑点 2.50）；4 一根 K 线两边都碰到（最低 94.00、最高 106.00，按止盈）；5a 分两次成交 4 + 6 股后在 94.80 触发、价格不重算；5b 只成交 4 股时触发：撤余量、卖 4 股，撤单前又成交 2 股则补卖 2 股
+
+### 文件
+
+- 新增：`src/mooapp/strategy/` 下 `expr.py`、`ticks.py`、`spec.py`、`rule.schema.json`、`machine.py`、`dryrun.py`；`docs/adr/0027-rule-engine-semantics.md`；`examples/rules/spy-oco.yaml`、`examples/prices/*.csv`；测试 `test_expr.py`、`test_rule_spec.py`、`test_rule_machine.py`、`test_dryrun.py`
+- 修改：`ops/cli.py`（`rule dry-run`、`rule check`）、`pyproject.toml`、`uv.lock`；收尾时改 learnings 和 PROGRESS
+- 不改：风控限额、`tests/acceptance/`、`.claude/`、闸门和 OMS
+
+### 执行顺序
+
+1. 安装依赖、写 ADR-0027、把计划写进 PROGRESS（已完成）
+2. 写测试，跑一遍确认失败，原样贴出结果；**停下等你确认**
+3. 写实现，直到 `pytest` 通过
+4. `/milestone-git commit 6`
+
+M6b（另行计划）：rules 表与 `active_rule_for`、Moomoo 的 `subscribe_quotes`、把状态机接到闸门、OMS 和 HaltChanged、`rule add` 和 `rule list`、模拟盘验收 3
 
 ## M4 审查修复（已确认 2026-11-14，分支 `dev/milestone_4`）
 
@@ -228,6 +503,10 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 
 ## 待你处理
 
+- [ ] M6b（开盘后，在 M4 的事项之后，间隔 31 秒）：`! uv run mooapp db migrate`（执行 0003：rules、rule_orders、rule_events）
+- [ ] M6b（常规时段）：`! uv run python scripts/probe_m6_quote.py`（P11：报价推送频率、时区、open_price、盘前盘后的 last_price）；盘前或盘后再跑一次作对照
+- [ ] M6b（常规时段，不处于 halt）：`! uv run pytest -m sim tests/acceptance/test_m6_rule_oco.py`（最长约 10 分钟）
+
 - [ ] M4（周一）：`! uv run mooapp db migrate`（执行迁移 0002：audit、commands、orders.cancel_pending）
 - [ ] M4（周一常规时段）：`! uv run python scripts/probe_m4_pnl.py`（P10：模拟盘 today_pl_val 是否有效）。无效时闸门会拒绝所有买单，先看 P10 的结果再跑 M4 验收
 - [ ] M4（周一之前）：在 secrets 里加 `[resume] key`（`python3 -c "import secrets; print(secrets.token_hex(32))"` 生成，文件权限保持 600），然后重启 `mooapp run`。没有这把密钥，常驻进程会拒绝所有 resume（ADR-0029）
@@ -238,8 +517,8 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 - [ ] M3：跑探针 P9：`! uv run python scripts/probe_m3_expiry.py`（美东 15:45–16:00），次日 `--check <order_id>`；App 里删一张远离市价的单后再 `--check`
 - [ ] M3：`! uv run mooapp db migrate`；常规时段 `! uv run pytest -m sim` 与 `! uv run pytest -m sim tests/acceptance/test_m3_idempotent_retry.py tests/acceptance/test_m3_restart_recovery.py`
 - [x] M3：审 diff 与两份 fixture，提交（aff9fee、600d29e）
-- [ ] M3（周一常规时段）：两份 M3 验收与 sim 契约测试**分开跑**，中间等满 31 秒，因为限频按账户算、多个 broker 共用额度（learnings「M3 › vendor 限频按账户计算」）。建议先给验收的 `finally` 加上撤单失败的处理
-- [ ] M3（周一美东 16:00 后，周二再一次）：`! uv run python scripts/probe_m3_expiry.py --check 841874 841875 841876 841877 841878 841879 841880 841881 841882 841883`，看 DAY 单过期后的状态 → 定 DISABLED 映射
+- [x] M3（2026-11-16）：两份 M3 验收分开跑，均通过（842592、842718，App 已核对）。原条目：两份 M3 验收与 sim 契约测试**分开跑**，中间等满 31 秒，因为限频按账户算、多个 broker 共用额度（learnings「M3 › vendor 限频按账户计算」）。建议先给验收的 `finally` 加上撤单失败的处理
+- [x] M3（周一美东 16:00 后，周二再一次）：P9 `--check` 已于 2026-11-16 10:29 完成，DAY 单过期为 CANCELLED_ALL（见「周一操作清单 › P9 结论」）；DISABLED 仍无样本
 - [ ] 决定：sim 测试里同一进程的多个 broker 是否共用限流器（进程级、按 acc_id）
 - [ ] M3：验收通过后 `/milestone-git finish 3`（tag `accept/milestone_3`）
 - [ ] 提交 `.claude/skills/milestone-git/`（你本人提交：`.claude/` 由你维护）

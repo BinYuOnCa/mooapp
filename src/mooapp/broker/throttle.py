@@ -177,3 +177,9 @@ class ThrottledBroker:
 
     def is_trading_day(self, d: date) -> bool:
         return self.inner.is_trading_day(d)  # type: ignore[attr-defined]
+
+    def subscribe_quotes(self, symbols: list[str], cb: Callable[[Quote], None]) -> None:
+        self.inner.subscribe_quotes(symbols, cb)  # type: ignore[attr-defined]
+
+    def unsubscribe_quotes(self, symbols: list[str]) -> None:
+        self.inner.unsubscribe_quotes(symbols)  # type: ignore[attr-defined]

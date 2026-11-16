@@ -1,0 +1,13 @@
+# 示例规则（手册 M6 第 1 点）：入场后，止损价 = min(开盘价, 买入均价) × 0.95，止盈价 = max(开盘价, 买入均价) × 1.05，两者互为 OCO。
+# 检查：  uv run mooapp rule check examples/rules/spy-oco.yaml
+# 回放：  uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv
+# 表达式只允许 open、avg_cost、last、min、max、round_tick 和 + - * /（ast 白名单，不使用 eval）。
+# 止损价向上、止盈价向下取整到最小变动单位（ADR-0009）；首次成交时算一次，之后不重算（ADR-0005）。
+id: spy-oco-1
+symbol: US.SPY
+entry:
+  side: BUY             # 入场只允许限价 DAY 买入（ADR-0004）
+  qty: 10
+  limit_price: "100.21" # 写成字符串，避免浮点误差；必须落在最小变动单位上
+stop: "min(open, avg_cost) * 0.95"
+take: "max(open, avg_cost) * 1.05"

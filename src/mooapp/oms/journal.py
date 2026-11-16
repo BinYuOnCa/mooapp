@@ -25,12 +25,15 @@ from typing import Any
 
 from mooapp.common import Env, OrderKind, Side, Source
 from mooapp.oms.state import Order, OrdStatus
-from mooapp.oms.store import AuditRecord, EventRecord, FillRecord, Store, StoreError, StoreUnavailable
+from mooapp.oms.store import AuditRecord, EventRecord, FillRecord, RuleEventRecord, RuleRecord, Store, StoreError, StoreUnavailable
 
 log = logging.getLogger(__name__)
 
 _WRITE_OPS = frozenset(
-    {"insert_order", "update_order", "append_event", "insert_fill_once", "append_recon", "set_kv", "append_audit", "finish_command"}
+    {
+        "insert_order", "update_order", "append_event", "insert_fill_once", "append_recon", "set_kv", "append_audit", "finish_command",
+        "insert_rule", "update_rule", "link_rule_order", "append_rule_event",
+    }  # fmt: skip
 )
 _ORDER_SKIP = frozenset({"seen_exec_ids", "anomalies", "history"})
 _ORDER_ENUMS: dict[str, type] = {"side": Side, "kind": OrderKind, "source": Source, "status": OrdStatus, "base_status": OrdStatus}
@@ -49,6 +52,10 @@ def _enc(v: Any) -> Any:
         return {"__fill__": {f.name: _enc(getattr(v, f.name)) for f in fields(v)}}
     if isinstance(v, AuditRecord):
         return {"__audit__": {f.name: _enc(getattr(v, f.name)) for f in fields(v)}}
+    if isinstance(v, RuleRecord):
+        return {"__rule__": {f.name: _enc(getattr(v, f.name)) for f in fields(v)}}
+    if isinstance(v, RuleEventRecord):
+        return {"__rule_event__": {f.name: _enc(getattr(v, f.name)) for f in fields(v)}}
     if isinstance(v, Decimal):
         return {"__dec__": str(v)}
     if isinstance(v, datetime):
@@ -78,6 +85,10 @@ def _dec(v: Any) -> Any:
             d = {k: _dec(x) for k, x in v["__fill__"].items()}
             d["side"] = Side(d["side"])
             return FillRecord(**d)
+        if "__rule__" in v:
+            return RuleRecord(**{k: _dec(x) for k, x in v["__rule__"].items()})
+        if "__rule_event__" in v:
+            return RuleEventRecord(**{k: _dec(x) for k, x in v["__rule_event__"].items()})
         if "__audit__" in v:
             return AuditRecord(**{k: _dec(x) for k, x in v["__audit__"].items()})
         if "__dec__" in v:

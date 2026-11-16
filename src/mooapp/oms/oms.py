@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, NotSupported, OrderRequest, Position
 from mooapp.clock import Clock
 from mooapp.common import Env, MooappError, Side, Source
-from mooapp.oms.events import Alert, CancelDue, DealPollRequested, EventBus, OmsReady
+from mooapp.oms.events import Alert, CancelDue, DealPollRequested, EventBus, OmsReady, OrderChanged
 from mooapp.oms.journal import Journal, ReplayReport, replay_journal
 from mooapp.oms.mapping import map_snapshot
 from mooapp.oms.state import TERMINAL, Event, EventType, Order, OrderError, OrdStatus, apply
@@ -446,6 +446,8 @@ class OMS:
             self.bus.publish(a)
         for n in notices:
             self.bus.publish(n)
+        if any(r.outcome == "applied" for r in records):
+            self.bus.publish(OrderChanged(replace(o)))  # M6b：规则引擎订阅
         return o
 
     # ------------------------------------------------------------------ 启动恢复

@@ -432,3 +432,76 @@ def test_claim_skips_rows_locked_by_other_connection(pg_schema):
     finally:
         a.close()
         b.close()
+
+
+# ------------------------------------------------------------------ M6b：rules、rule_orders、rule_events（只追加）、active_rule_for
+
+
+def rule_rec(rule_id="r1", symbol="US.SPY", status="PENDING"):
+    from mooapp.oms.store import RuleRecord
+
+    return RuleRecord(rule_id, symbol, "id: r1\n", status, "e" * 32, {"bought": 0}, "cli:test", T, T)
+
+
+def test_rules_roundtrip_and_active_lookup(store):
+    with store.transaction():
+        store.insert_rule(rule_rec())
+    r = store.get_rule("r1")
+    assert r is not None and r.state == {"bought": 0} and r.entry_cid == "e" * 32
+    assert store.active_rule_for("US.SPY") == "r1"
+    with store.transaction():
+        store.update_rule("r1", "ARMED", {"bought": 10, "stop_price": "95.00"}, T + timedelta(seconds=1))
+    assert store.get_rule("r1").status == "ARMED" and store.get_rule("r1").state["stop_price"] == "95.00"
+    assert store.active_rule_for("US.SPY") == "r1"
+    with store.transaction():
+        store.update_rule("r1", "CLOSED", {"bought": 10}, T + timedelta(seconds=2))
+    assert store.active_rule_for("US.SPY") is None
+    assert [x.id for x in store.list_rules(active_only=False)] == ["r1"]
+    assert store.list_rules(active_only=True) == []
+
+
+def test_rule_duplicate_id_rejected(store):
+    with store.transaction():
+        store.insert_rule(rule_rec())
+    with pytest.raises(StoreError):
+        with store.transaction():
+            store.insert_rule(rule_rec())
+
+
+def test_rule_orders_mapping(store):
+    with store.transaction():
+        store.insert_rule(rule_rec())
+        store.link_rule_order("a" * 32, "r1", "entry", T)
+        store.link_rule_order("b" * 32, "r1", "sell", T)
+    assert store.rule_order("a" * 32) == ("r1", "entry")
+    assert store.rule_order("c" * 32) is None
+    assert store.rule_orders("r1") == [("a" * 32, "entry"), ("b" * 32, "sell")]
+
+
+def test_rule_events_append(store):
+    from mooapp.oms.store import RuleEventRecord
+
+    with store.transaction():
+        store.insert_rule(rule_rec())
+        store.append_rule_event(RuleEventRecord("r1", T, "frozen", "止损价 95.00", {"x": 1}))
+    (e,) = store.rule_events("r1")
+    assert (e.kind, e.message, e.details) == ("frozen", "止损价 95.00", {"x": 1})
+
+
+@pytest.mark.pg
+@pytest.mark.parametrize("stmt", ["UPDATE {s}.rule_events SET ts = ts", "DELETE FROM {s}.rule_events", "TRUNCATE {s}.rule_events"])
+def test_rule_events_append_only(pg_schema, stmt):
+    import psycopg
+
+    from mooapp.oms.pg_store import PostgresStore
+    from mooapp.oms.store import RuleEventRecord
+
+    dsn, schema = pg_schema
+    st = PostgresStore(dsn, schema=schema, other_schema="real")
+    with st.transaction():
+        st.insert_rule(rule_rec())
+        st.append_rule_event(RuleEventRecord("r1", T, "frozen", "x", {}))
+    st.close()
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with pytest.raises(psycopg.Error, match="只追加"):
+            conn.execute(stmt.format(s=schema))
