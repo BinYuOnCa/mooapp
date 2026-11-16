@@ -180,6 +180,7 @@ class Position:
     qty: int
     can_sell_qty: int
     avg_cost: Decimal | None  # vendor § Get Positions：average_cost 对证券模拟账户可能无效
+    today_pl_val: Decimal | None = None  # vendor § Get Positions › today_pl_val；缺失或无效为 None（模拟盘是否有效见 P10）
 
 
 @dataclass(frozen=True)
@@ -216,6 +217,8 @@ class BrokerPort(Protocol):
     def query_deals(self) -> list[BrokerFill]: ...
     def query_fees(self, broker_order_ids: list[str]) -> dict[str, Decimal]: ...
     def query_positions(self) -> list[Position]: ...
+    # 当日盈亏：全部持仓行（含当天卖光、qty=0 的行）today_pl_val 之和；任一行无效返回 None（M4 确认点 2）
+    def query_today_pnl(self) -> Decimal | None: ...
     def query_cash(self) -> Cash: ...
 
     # 推送

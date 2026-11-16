@@ -282,6 +282,28 @@ def test_query_orders_refresh_passes_refresh_cache(broker, ctxs):
     assert [kw["refresh_cache"] for kw in kws[-2:]] == [True, False]
 
 
+def test_query_today_pnl_sums_all_rows_including_closed(broker, ctxs):
+    """M4 确认点 2：vendor § Get Positions › today_pl_val；qty=0 的行也要算（当天卖光的盈亏）。"""
+    trade = ctxs[0]
+    trade.responses["position_list_query"] = (
+        0,
+        DF(
+            [
+                {"code": "US.SPY", "qty": 1.0, "can_sell_qty": 1.0, "average_cost": 759.67, "today_pl_val": -1.5},
+                {"code": "US.TD", "qty": 0.0, "can_sell_qty": 0.0, "average_cost": 0.0, "today_pl_val": 0.25},
+            ]
+        ),
+    )
+    assert broker.query_today_pnl() == Decimal("-1.25")
+    kw = [kw for name, kw in trade.calls if name == "position_list_query"][-1]
+    assert kw["trd_env"] == FT.TrdEnv.SIMULATE and kw["acc_id"] == ACC
+
+
+def test_query_today_pnl_unavailable_when_field_missing(broker):
+    # 默认桩数据没有 today_pl_val
+    assert broker.query_today_pnl() is None
+
+
 def test_query_positions_drops_zero_qty(broker):
     ps = broker.query_positions()
     assert [(p.symbol, p.qty) for p in ps] == [("US.SPY", 1)]

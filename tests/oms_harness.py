@@ -17,6 +17,7 @@ from mooapp.broker.fake import FakeBroker
 from mooapp.broker.port import BrokerOrder, OrderRequest, new_client_order_id
 from mooapp.clock import FakeClock
 from mooapp.common import Env, OrderKind, Side, Source
+from mooapp.config.models import RiskLimits
 from mooapp.oms.events import Alert, EventBus
 from mooapp.oms.executor import Executor
 from mooapp.oms.oms import OMS
@@ -27,8 +28,22 @@ from mooapp.risk.gate import Decision, Intent, RiskGate
 
 REPO = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-WHITELIST = frozenset({"US.SPY", "US.QQQ", "US.TD"})
+WHITELIST = ("US.SPY", "US.QQQ", "US.TD")
 T0 = datetime(2026, 11, 13, 15, 0, tzinfo=UTC)  # 美东 10:00
+QUOTE = Decimal("10.00")  # 测试默认最新价；M3 测试的单都是 10.00 限价
+
+# 宽松限额：M3 的 OMS 测试不应被限额挡住。M4 规则的边界测试在 test_risk_rules.py 里用自己的限额
+LOOSE_LIMITS = RiskLimits(
+    whitelist=WHITELIST,
+    max_order_qty=10_000,
+    max_order_value=Decimal("10000000"),
+    max_position_qty=1_000_000,
+    max_daily_orders=10_000,
+    max_daily_loss=Decimal("10000000"),
+    halt_on_daily_loss=True,
+    max_limit_deviation_pct=Decimal("50"),
+    regular_hours_only=True,
+)
 
 
 @dataclass
@@ -68,6 +83,12 @@ class System:
     def cancel(self, cid: str) -> Decision:
         return self.gate.submit(Intent(source=Source.CLI, action="cancel", client_order_id=cid, actor="test"))
 
+    def market_open(self, symbols: tuple[str, ...] = WHITELIST, last: Decimal = QUOTE) -> None:
+        """常规时段 + 新鲜行情（报价时间 = 当前 FakeClock 时间）。"""
+        for s in symbols:
+            self.broker.set_market_state(s, "AFTERNOON")
+            self.broker.set_quote(s, last=last, bid=last, ask=last)
+
     def alert_kinds(self) -> list[str]:
         return [a.kind for a in self.alerts]
 
@@ -79,22 +100,40 @@ def make_system(
     clock: FakeClock | None = None,
     attach: bool = True,
     recover: bool = True,
+    limits: RiskLimits = LOOSE_LIMITS,
+    stale_after_seconds: float = 3600.0,  # M3 测试里 Resolver 会推进 FakeClock，默认放宽；行情过期规则另测
+    open_market: bool = True,
+    journal: Any = None,  # M4 审查修复：OMS 启动恢复时回放的 journal（ADR-0025）
 ) -> System:
     clock = clock or FakeClock(T0)
     broker = broker or FakeBroker(env, clock)
+    if env is Env.REAL and not broker.calls("unlock"):
+        broker.unlock("test-only")  # FakeBroker 的 REAL 写接口要求先解锁（M3 的 REAL 测试直接驱动 OMS）
     store = store if store is not None else MemoryStore()
     bus = EventBus()
     alerts: list[Alert] = []
     bus.subscribe(Alert, alerts.append)
-    oms = OMS(store=store, broker=broker, bus=bus, clock=clock, env=env)
+    oms = OMS(store=store, broker=broker, bus=bus, clock=clock, env=env, journal=journal)
     pump = EventPump(oms, threaded=False)
     if attach:
         pump.attach(broker)
     poller = Poller(broker=broker, pump=pump, env=env, bus=bus, interval=5.0)
     executor = Executor(oms=oms, broker=broker, pump=pump, clock=clock, bus=bus, resolver_grace=3.0)
     oms.set_executor(executor)  # 启动恢复时，本地 PENDING_NEW 而券商端没有的订单交给 Resolver
-    gate = RiskGate(env=env, whitelist=WHITELIST, oms=oms, executor=executor)
+    gate = RiskGate(
+        env=env,
+        limits=limits,
+        oms=oms,
+        executor=executor,
+        md=broker,
+        store=store,
+        bus=bus,
+        clock=clock,
+        stale_after_seconds=stale_after_seconds,
+    )
     sys = System(env, clock, broker, store, bus, oms, pump, poller, executor, gate, alerts)
+    if open_market:
+        sys.market_open()
     if recover:
         oms.recover()
     return sys

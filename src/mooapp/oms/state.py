@@ -200,6 +200,7 @@ class Order:
     reason: str | None = None
     raw_status: str | None = None
     raw_dealt_qty: int | None = None
+    cancel_pending: bool = False  # ADR-0026：确认之前收到的撤单，确认后自动发出
     created_at: datetime | None = None
     updated_at: datetime | None = None
     seen_exec_ids: set[str] = field(default_factory=set, compare=False, repr=False)

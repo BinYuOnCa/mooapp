@@ -187,3 +187,26 @@ mooapp=# alter schema real owner to mooapp_real;
 ALTER SCHEMA
 
 
+# git 相关
+
+## 常用设置
+一个可选的设置：git config --global merge.conflictstyle zdiff3。设置后，冲突段里会多出一段 ||||||| base，显示共同祖先的原文，判断「谁改了什么」会容易很多。这个设置会改你的 git 全局配置，
+
+
+## 常用操作
+
+```
+git log --graph --oneline 
+```
+### 用Branch来记录Milestone
+
+```commandline
+git switch -c dev/milestone_N
+# ……开发、提交（Claude 只在你要求时提交）……
+# 验收通过后：
+git switch main
+git merge --no-ff dev/milestone_N      # 保留里程碑的合并点；也可以用 --squash 合成一个提交
+git tag accept/milestone_N
+git branch -d dev/milestone_N     #可选项，可保留以回溯修改历史 
+```
+注： 可用SKILLS /milestone 

@@ -169,41 +169,90 @@ def test_throttled_broker_20_orders_and_20_cancels_no_rate_limit():
     assert len(fb.calls("cancel_order")) == 20
 
 
-def test_throttled_broker_passes_reads_through_unthrottled():
+def test_throttled_broker_passes_other_reads_through_unthrottled():
+    """持仓、资金查询走 OpenD 缓存不限流（vendor § Get Positions：只有刷新缓存时才受限频）。
+    订单查询 M4 起全部限流，见下方 M4 一节。"""
     c = FakeClock(T0)
     fb = FakeBroker(env=Env.SIMULATE, clock=c, strict_limits=True)
     b = ThrottledBroker(fb, c)
     before = c.monotonic()
     for _ in range(50):
-        b.query_orders()
         b.query_positions()
+        b.query_cash()
     assert c.monotonic() == before
     assert b.env is Env.SIMULATE
 
 
-# ------------------------------------------------------------------ M3：order_list_query(refresh_cache=True)
+# ------------------------------------------------------------------ M4：所有 order_list_query 限流；同一账户的实例共用限流器
 
 
-def test_refresh_query_rule_matches_vendor():
-    """vendor § Get open Orders › Interface Limitations：每个 acc_id 30 秒 10 次。缓存查询（refresh=False）仍不限流。"""
-    from mooapp.broker.throttle import QUERY_REFRESH_RULE
+def test_order_query_rule_matches_vendor():
+    """vendor § Get open Orders › Interface Limitations：每个 acc_id 30 秒 10 次（M4 默认做法 2：不分是否刷新缓存）。"""
+    from mooapp.broker.throttle import QUERY_ORDERS_RULE
 
-    assert (QUERY_REFRESH_RULE.max_calls, QUERY_REFRESH_RULE.window, QUERY_REFRESH_RULE.margin) == (10, 30.0, 1.0)
+    assert (QUERY_ORDERS_RULE.max_calls, QUERY_ORDERS_RULE.window, QUERY_ORDERS_RULE.margin) == (10, 30.0, 1.0)
 
 
-def test_throttled_broker_throttles_only_refresh_queries():
+@pytest.mark.parametrize("refresh", [True, False])
+def test_throttled_broker_throttles_all_order_queries(refresh):
     c = FakeClock(T0)
     fb = FakeBroker(env=Env.SIMULATE, clock=c)
     b = ThrottledBroker(fb, c)
     start = c.monotonic()
     for _ in range(10):
-        b.query_orders(open_only=False, refresh=True)
+        b.query_orders(open_only=False, refresh=refresh)
     assert c.monotonic() - start < 1.0
-    b.query_orders(open_only=False, refresh=True)  # 第 11 次等窗口
+    b.query_orders(open_only=False, refresh=refresh)  # 第 11 次等窗口
     assert c.monotonic() - start >= 31.0 - 1e-9
-    mid = c.monotonic()
-    for _ in range(20):
-        b.query_orders(open_only=False)
-    assert c.monotonic() == mid
-    assert fb.calls("query_orders")[-1] == (False, False)
-    assert fb.calls("query_orders")[0] == (False, True)
+    assert fb.calls("query_orders")[0] == (False, refresh)
+
+
+def test_instances_sharing_registry_share_quota():
+    """learnings「M3 › vendor 限频按账户计算」：同一账户的多个 broker 实例共用一份额度。"""
+    from mooapp.broker.throttle import ThrottleRegistry
+
+    c = FakeClock(T0)
+    reg = ThrottleRegistry()
+    fb1 = FakeBroker(env=Env.SIMULATE, clock=c, strict_limits=True)
+    fb2 = FakeBroker(env=Env.SIMULATE, clock=c, strict_limits=True)
+    b1 = ThrottledBroker(fb1, c, registry=reg, account_key=(Env.SIMULATE, 4165))
+    b2 = ThrottledBroker(fb2, c, registry=reg, account_key=(Env.SIMULATE, 4165))
+    start = c.monotonic()
+    for _ in range(15):
+        b1.place_order(far_buy())
+    b2.place_order(far_buy())  # 同一账户的第 16 次：要等窗口
+    assert c.monotonic() - start >= 31.0 - 1e-9
+
+
+def test_different_accounts_do_not_share_quota():
+    from mooapp.broker.throttle import ThrottleRegistry
+
+    c = FakeClock(T0)
+    reg = ThrottleRegistry()
+    b1 = ThrottledBroker(FakeBroker(env=Env.SIMULATE, clock=c), c, registry=reg, account_key=(Env.SIMULATE, 1))
+    b2 = ThrottledBroker(FakeBroker(env=Env.SIMULATE, clock=c), c, registry=reg, account_key=(Env.SIMULATE, 2))
+    start = c.monotonic()
+    for _ in range(15):
+        b1.place_order(far_buy())
+    b2.place_order(far_buy())
+    assert c.monotonic() - start < 1.0
+
+
+def test_registry_rejects_mixed_clocks():
+    """共用的限流器必须用同一个时钟，否则时间戳不可比。"""
+    from mooapp.broker.throttle import ThrottleRegistry
+
+    reg = ThrottleRegistry()
+    ThrottledBroker(FakeBroker(Env.SIMULATE, FakeClock(T0)), FakeClock(T0), registry=reg, account_key=("k",))
+    with pytest.raises(ValueError):
+        ThrottledBroker(FakeBroker(Env.SIMULATE, FakeClock(T0)), FakeClock(T0), registry=reg, account_key=("k",))
+
+
+def test_open_broker_uses_shared_registry():
+    """open_broker 按 (env, acc_id) 使用进程级共享注册表（静态检查调用参数）。"""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "src" / "mooapp" / "broker" / "moomoo.py").read_text(encoding="utf-8")
+    calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "ThrottledBroker"]
+    assert calls and all({k.arg for k in c.keywords} >= {"registry", "account_key"} for c in calls)
