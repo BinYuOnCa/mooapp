@@ -79,7 +79,8 @@ def reconcile(
     for symbol in sorted(set(own_net) | set(held)):
         mine = own_net.get(symbol, 0)
         theirs = held.get(symbol, 0)
-        if theirs < mine:
+        if mine < 0 or theirs < mine:
+            # 本程序净持仓为负说明本地成交有误（ADR-0002 不做空）；差额不能当成程序外持仓（验收 2 实跑发现）
             res.breaks.append(ReconBreak("position_mismatch", symbol, None, {"own_net": mine, "broker_qty": theirs}))
         elif theirs > mine:
             res.external_qty[symbol] = theirs - mine  # ADR-0019：程序外部分，只报告

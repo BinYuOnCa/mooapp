@@ -11,6 +11,8 @@
 
 **状态（2026-11-16 晚）**：实现完成，`pytest` 841 passed，`pytest -m pg` 45 passed。新增：`src/mooapp/eod/`（pnl、recon、report、run）、`mooapp eod [--date]`（退出码 0 / EXIT_BREAK=5 / EXIT_CONFIG=2）、迁移 0004（eod_reports，只追加）、`query_positions(refresh)`、`Quote.prev_close`、`close_times`、持仓刷新限流。与计划的小差异：`close_time(d)` 实现为区间版 `close_times(start, end)`（一次日历查询）；`run_eod` 签名改为接收 Store 与 env（不构造 OMS），SPEC 已同步。已完成：`mooapp db migrate`（0004）。**第一轮实测（2026-11-16 收盘后，不计入验收）**：`mooapp eod` 无差异；已实现 0.59、买 8 卖 8、持仓 0；用 journal 里的 10 笔成交独立计算，结果一致（+0.12 +0.20 +0.40 −0.04 −0.09）；51 张契约测试直接下的 moo: 订单只报告。待你：验收 2、3 的草稿复制进 `tests/acceptance/`
 
+**M7 验收 2 通过**（2026-11-16 收盘后）：`test_m7_fake_fill_break.py` `1 passed`；假成交（随机选中 M6 止损卖单 843612，插入 1 笔假卖出）→ `[BREAK] fill_qty_mismatch`（本地 2 / 券商 1）+ `local_anomaly`（卖超）；回滚后 `mooapp eod` 仍为无差异。实跑发现：本程序净持仓为负时，差额被误报为「程序外持仓」→ 已修复（先写失败测试 `test_fake_local_sell_fill_is_position_break_not_external`，现报 `position_mismatch`）
+
 ### M7 验收 3 登记（连续 5 个交易日，每天有成交、零差异；中断从头数）
 
 | # | 交易日 | 盘中成交 | `test_m7_daily_clean.py` | 备注 |
