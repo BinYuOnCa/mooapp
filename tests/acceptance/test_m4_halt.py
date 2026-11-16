@@ -1,5 +1,5 @@
 """M4 验收 3：模拟盘挂 3 张单后执行 halt：全部撤销，新单被拒。
-常规时段运行；与其他 sim 测试间隔 31 秒（限频按账户算）。US.SPY 限价买 1 股 × 3，价格 = 最新价 × 0.9（不会成交）。
+常规时段运行；与其他 sim 测试间隔 31 秒（限频按账户算）。US.SPY 限价买 1 股 × 3，价格 = 最新价 × 0.96（偏离约 4%，在 [risk.simulate] 的 5% 以内；不会成交）。
 结束后 halt 状态保留（ADR-0022），需要你在终端里运行 mooapp resume 解除。"""
 import time
 from decimal import ROUND_DOWN, Decimal
@@ -29,7 +29,7 @@ def test_halt_cancels_three_orders_and_rejects_new():
     try:
         assert not rt.gate.halted, "开始前不应处于 halt：先运行 mooapp resume"
         last = rt.md.snapshot(["US.SPY"])[0].last
-        px = (last * Decimal("0.9")).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        px = (last * Decimal("0.96")).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
         cids = []
         for _ in range(3):
             r = client.submit("place", client.place_payload("US.SPY", "BUY", 1, px), actor="acceptance:m4")
