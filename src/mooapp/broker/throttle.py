@@ -3,7 +3,8 @@
 vendor 限频（各接口 Interface Limitations）：
 - § Place Orders：每个 acc_id 30 秒 15 次，连续两次间隔 ≥ 0.02 秒
 - § Modify or Cancel Orders：30 秒 20 次，间隔 ≥ 0.04 秒
-窗口多留 1 秒余量。查询类接口用 refresh_cache=False 走缓存，不限流。
+窗口多留 1 秒余量。查询类接口用 refresh_cache=False 走缓存，不限流；
+M3 起 query_orders(refresh=True) 按 § Get open Orders 限 30 秒 10 次。
 
 Throttle 采用「预约时间槽」：加锁计算本次最早可发出的时刻并登记，解锁后再 sleep。
 多线程同时排队时各自拿到不同的槽，不会同时冲进同一个窗口。
@@ -34,6 +35,9 @@ class RateRule:
 
 PLACE_RULE = RateRule("place_order", max_calls=15, window=30.0, min_interval=0.02, margin=1.0)
 CANCEL_RULE = RateRule("modify_order", max_calls=20, window=30.0, min_interval=0.04, margin=1.0)
+# vendor § Get open Orders › Interface Limitations：每个 acc_id 30 秒 10 次。只限 refresh_cache=True 的查询；
+# 走缓存的查询维持 M2 的做法不限流（M3 第 2 步说明，待你确认是否改为全部限流）
+QUERY_REFRESH_RULE = RateRule("order_list_query(refresh)", max_calls=10, window=30.0, min_interval=0.0, margin=1.0)
 
 DEFAULT_MAX_WAIT = 60.0
 
@@ -71,6 +75,7 @@ class ThrottledBroker:
         self.inner = inner
         self._place = Throttle(PLACE_RULE, clock, max_wait)
         self._cancel = Throttle(CANCEL_RULE, clock, max_wait)
+        self._refresh = Throttle(QUERY_REFRESH_RULE, clock, max_wait)
 
     @property
     def env(self) -> Env:
@@ -86,8 +91,10 @@ class ThrottledBroker:
         self.inner.cancel_order(broker_order_id)
 
     # 读
-    def query_orders(self, open_only: bool = True) -> list[BrokerOrder]:
-        return self.inner.query_orders(open_only=open_only)
+    def query_orders(self, open_only: bool = True, refresh: bool = False) -> list[BrokerOrder]:
+        if refresh:
+            self._refresh.acquire()
+        return self.inner.query_orders(open_only=open_only, refresh=refresh)
 
     def query_deals(self) -> list[BrokerFill]:
         return self.inner.query_deals()

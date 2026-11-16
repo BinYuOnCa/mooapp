@@ -1,7 +1,37 @@
 # PROGRESS
 
-**当前**：M2 第 4 步完成（2026-11-13）：实现完成，`pytest` 180 passed（含 FakeBroker 部分成交 2 项，覆盖验收第 3 条后半句）；你在常规时段跑的模拟盘契约测试 7 passed、验收测试 1 passed，推送录在 `recordings/pushes/SIMULATE_20261113T184058Z.jsonl`
-**下一步**：你审 M2 diff、提交、`git tag m2`；SPEC 8 节验收第 3 条改口径（你手工改）。之后进入 M3 计划
+**当前**：M3 第 3 步完成（2026-11-13）：OMS 核心实现完成，`pytest` 403 passed，`pytest -m pg` 25 passed（Claude 在 sandbox 内运行）。计划见下方「M3 计划」
+**下一步**（第 4 步，你用 `!` 运行）：探针 P9 次日 `--check 841874 841875`；常规时段（周一）跑 `pytest -m sim` 和 `tests/acceptance/test_m3_*.py`。之后写 learnings 的 P9 结论；验收通过后 `/milestone-git finish 3`（合并到 main，tag `accept/milestone_3`）。周末先在 `dev/milestone_4`（从 `dev/milestone_3` 拉出）推进 M4
+
+**Git 命名**（2026-11-13 起）：分支 `dev/milestone_N`（合并后保留），tag `accept/milestone_N`（打在 main 的合并提交上）；旧的 m1、m2 tag 与 m2、m3 分支已改成新名字。流程见 `.claude/skills/milestone-git/SKILL.md`（`/milestone-git <start|commit|finish|push|status> <N>`）
+
+## M3 计划（已确认 2026-11-13）
+
+目标：SPEC 8 节 M3 四条验收。完整计划在会话中给出；要点如下。
+
+### 你确认的点
+
+1. 超时重发：新增 T55 `UNKNOWN + RESUBMIT → PENDING_NEW`。连续 2 次刷新缓存的查询都查不到才重发，同一 cid，最多 3 次（docs/order-transitions.md）
+2. DISABLED、DELETED 在实测前按「映射不了」处理（写事件、报警、状态不动）；探针 P9 `scripts/probe_m3_expiry.py`
+3. M3 先做闸门骨架 `risk/gate.py`（REAL 拒绝、未就绪、halt（内存）、白名单），Executor 只认 GateTicket；限额规则在 M4
+4. journal（ADR-0025）进 M3；`commands` 表和 `mooapp run` 推到 M4
+
+### 与计划的差异（均已在会话中说明）
+
+- Resolver 并进 `oms/executor.py`，不单独建 `resolver.py`：对外能发单的只有 `place`、`cancel`（都要 ticket）和 `resolve_unknown`（只处理已过闸门的 UNKNOWN 单）
+- `GateTicket` 放在 `oms/ticket.py`，避免 oms 反向依赖 risk
+- 只有 `refresh=True` 的查询限流（30 秒 10 次）；走缓存的查询维持 M2 的做法不限流（**待你确认**）
+- 迁移多一张 `journal_applied` 表（journal 按 entry_id 幂等）
+- 状态映射补了两条规则：没看到确认就看到撤销时先补 ACK；本地已是同一结局时不再发事件（docs/status-mapping.md）
+- Moomoo 状态共 11 个，计划里误写成 12 个，已改正
+- 修改了已有测试：`test_layering.py`（放行 executor）、`test_throttle.py`、`test_moomoo_broker.py`、`tests/contract/test_broker_contract.py`（各加 refresh 用例）；第 3 步改了自己写的 `test_cancel_rejected_by_broker_goes_back_and_raises`（同步模式下要让推送真的丢失）
+
+### 文件
+
+- 新增：`src/mooapp/oms/` 下 `state.py`、`mapping.py`、`events.py`、`store.py`、`pg_store.py`、`journal.py`、`migrate.py`、`ticket.py`、`executor.py`、`pump.py`、`poller.py`、`oms.py`；`src/mooapp/risk/gate.py`；`db/migrations/0001_oms.sql`、`db/routines/.gitkeep`；`docs/status-mapping.md`；`scripts/probe_m3_expiry.py`；测试和 `tests/fixtures/`（两份推送 fixture，不含 acc_id，请审核）
+- 修改：`docs/order-transitions.md`（T55）、`broker/port.py`、`broker/moomoo.py`、`broker/throttle.py`、`broker/fake.py`、`ops/cli.py`（`db migrate`、`order list`）、learnings、PROGRESS
+- 删除：`src/mooapp/oms/.gitkeep`、`src/mooapp/risk/.gitkeep`
+- 不改：风控限额、`config/*.toml`、`tests/acceptance/`（两份 M3 验收由你复制和维护）、`.claude/`；无新依赖
 
 ## 已完成
 
@@ -139,6 +169,16 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 5. 结论写进 learnings、PROGRESS；你审 diff、提交、`git tag m1`
 
 ## 待你处理
+
+- [ ] M3：确认是否所有 `order_list_query` 都限流（目前只限 refresh=True）
+- [ ] M3：跑探针 P9：`! uv run python scripts/probe_m3_expiry.py`（美东 15:45–16:00），次日 `--check <order_id>`；App 里删一张远离市价的单后再 `--check`
+- [ ] M3：`! uv run mooapp db migrate`；常规时段 `! uv run pytest -m sim` 与 `! uv run pytest -m sim tests/acceptance/test_m3_idempotent_retry.py tests/acceptance/test_m3_restart_recovery.py`
+- [x] M3：审 diff 与两份 fixture，提交（aff9fee、600d29e）
+- [ ] M3（周一常规时段）：两份 M3 验收与 sim 契约测试**分开跑**，中间等满 31 秒，因为限频按账户算、多个 broker 共用额度（learnings「M3 › vendor 限频按账户计算」）。建议先给验收的 `finally` 加上撤单失败的处理
+- [ ] M3（周一美东 16:00 后，周二再一次）：`! uv run python scripts/probe_m3_expiry.py --check 841874 841875 841876 841877 841878 841879 841880 841881 841882 841883`，看 DAY 单过期后的状态 → 定 DISABLED 映射
+- [ ] 决定：sim 测试里同一进程的多个 broker 是否共用限流器（进程级、按 acc_id）
+- [ ] M3：验收通过后 `/milestone-git finish 3`（tag `accept/milestone_3`）
+- [ ] 提交 `.claude/skills/milestone-git/`（你本人提交：`.claude/` 由你维护）
 
 - [ ] SPEC 8 节 M2 验收第 3 条改口径（你手工改）：模拟盘只录「整单成交 + 撤单」，部分成交由 FakeBroker 注入的推送覆盖（learnings「M2 › 模拟盘不会部分成交」）
 - [x] 提交 `docs/learnings.md`、`PROGRESS.md` 中第二次部分成交探针的结论（ef26879）

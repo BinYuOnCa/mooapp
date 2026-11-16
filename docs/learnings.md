@@ -328,3 +328,70 @@ App 里当天模拟账户的 5 张订单与录制一致（你 2026-11-13 核对�
 - **出处**：`src/mooapp/broker/`（M2 实现，未提交）
 - **记录**：`recordings/pushes/SIMULATE_20261113T184058Z.jsonl`（契约测试；验收测试未开录制）；SDK 10.12.7208，OpenD 1012
 - **影响**：M2 验收 1、2 在模拟盘通过；验收 3 按改后的口径（整单成交 + 撤单）已有录制，部分成交由 FakeBroker 覆盖。这份录制是 M3 回放的输入
+
+## M3 OMS 核心：设计与实现中的发现（2026-11-13）
+
+探针 P9（DAY 单收盘过期、DELETED）只跑了第一次 `--check`（见本节末尾），过期结论要等 2026-11-16（周一）收盘后再查；在那之前 DISABLED、DELETED 按「映射不了」报警（docs/status-mapping.md）。
+
+#### Moomoo 订单状态共 11 个，不是 12 个
+
+- **结论**：vendor § Trading Definitions › Order Status 列出 `NONE` 加 10 个（WAITING_SUBMIT … DELETED），共 11 个。SPEC 6 节「11 个（WAITING_SUBMIT … DELETED）」的写法容易数错，M3 计划里我也写成了 12 个，已在 status-mapping.md 和测试里改正
+- **依据**：文档（`tests/unit/test_status_mapping.py` 直接从 vendor 文档解析，防止再数错）
+- **出处**：vendor § Order Status（第 26023–26069 行）
+- **影响**：`oms/mapping.py` 的 `VENDOR_STATUSES`
+
+#### 快照是状态，不是事件：映射要看本地状态
+
+- **结论**：Moomoo 只给订单快照（状态 + 累计成交量），状态机要事件。同一个快照，本地状态不同，产生的事件也不同：
+  - 本地 PENDING_NEW 或 UNKNOWN 时直接看到 `CANCELLED_*`（推送丢了、轮询看到终态）：矩阵里没有 PENDING_NEW 加撤销的转换，要先补一个 ACK
+  - 本地已 CANCELED 再收到撤销快照：重复快照，不能再发事件，否则被判为非法回报、误报警
+  - 内容没变的快照（每 5 秒一次的轮询）直接跳过，不写事件，否则 order_events 会被轮询刷满
+- **依据**：设计推演，并由 `tests/unit/test_replay.py` 验证（M2 录制的 69 条推送随机丢 40% 再轮询）
+- **影响**：`oms/mapping.py`、`oms/oms.py`
+
+#### broker 层的 FillSynthesizer 重启后会造成超额成交
+
+- **结论**：`FillSynthesizer` 把已见的累计量记在内存里。重启后从 0 算起：重启前已成交 40 股，重启后收到累计 100 股的推送，会合成一条 100 股的成交。OMS 改为按本地 `cum_qty` 自己算增量，broker 层的合成成交不进 OMS（模拟盘）。成交 id `order_id:累计量` 是确定的，跨重启也能按 fill_id 去重
+- **依据**：读代码 + `test_oms_ingest.py::test_restart_after_partial_does_not_overfill`
+- **影响**：`oms/mapping.py synthesized_fill`、`EventPump.attach`
+
+#### 超时重发与「绝不重发」的冲突（T55）
+
+- **结论**：mini-OMS 的 UNKNOWN 态「只能等回报或对账，绝不重发」，而 M3 要求「确认不存在才重发」。你决定加 T55：用 `refresh_cache=True` 查询，等宽限期后连续 2 次都查不到这个 remark 才用同一 client_order_id 重发，最多发 3 次；用完次数判为 REJECTED 并报警
+- **依据**：你 2026-11-13 的决定；`tests/unit/test_executor_idempotency.py`
+- **出处**：vendor § Get open Orders（refresh_cache；限频 30 秒 10 次）；docs/order-transitions.md T55
+- **影响**：`oms/state.py`、`oms/executor.py`；查不到是否等于不存在仍依赖宽限期（默认 3 秒 × 2），模拟盘验收 4 会实测
+
+#### 管理员策略会盖住项目里的 sandbox socket 放行
+
+- **结论**：项目 `.claude/settings.json` 放行了 `/tmp/.s.PGSQL.5432`，但 sandbox 内连接仍报 `Operation not permitted`（`/tmp` 和 `/private/tmp` 两种写法都不行）。当时管理员策略 `managed-settings.json` 的 `sandbox.network` 只有 `allowedDomains`，没有 `allowUnixSockets`。你在管理员策略里加上 socket 放行后立即生效，`pytest -m pg` 25 passed
+- **依据**：实测（2026-11-13）
+- **影响**：以后改 sandbox 网络设置，要看管理员策略，不能只看项目配置
+
+#### 同步测试模式下「本地动作排在已到推送之后」
+
+- **结论**：EventPump 的 `call()` 先处理已入队的推送，再执行本地动作，和线程模式下的先进先出一致。因此要测「券商拒绝撤单」，必须让推送真的丢失（attach=False），否则成交推送会先到，撤单前订单已是 FILLED。这符合真实情况：OMS 能看到的，就是已到达的回报
+- **影响**：`tests/unit/test_executor_idempotency.py::test_cancel_rejected_by_broker_goes_back_and_raises`（第 3 步修改）
+
+#### vendor 限频按账户计算，多个 broker 实例共用一份额度（第一次 `pytest -m sim`）
+
+- **结论**：限频是整个账户共用的，不管有几个连接、几个进程。我们的 `ThrottledBroker` 每个实例单独计数：每个测试、每个子进程都会新建 broker，计数从 0 开始。同一个 30 秒窗口里先后建几个 broker，合计调用量就会超过账户额度，被券商拒绝
+- **实测**：你在美东约 16:00:45 运行 `uv run pytest -m sim`，用时 38.48 秒，结果 5 failed、12 passed、1 skipped。最先运行的 M2 限流验收（连下 20 笔、再全部撤销）通过。之后的 5 个失败全是券商的限频报错：
+  - 撤单 4 个：`Modify or Cancel Order request failed due to high frequency. Maximum 20 times per 30 seconds.`（两份 M3 验收的 `finally`、契约测试 `test_place_query_cancel_push`、`test_twenty_rapid_orders_no_rate_limit`）
+  - 下单 1 个：`Place Order request failed due to high frequency. Maximum 15 times per 30 seconds.`（`test_refresh_query_finds_order_by_remark`）
+- **依据**：实测（你贴的运行输出），加 OMS 数据库里的事件记录（撤单都是收到 SUBMITTED、本地已是 NEW 之后才被拒）
+- **出处**：vendor § Place Orders、§ Modify or Cancel Orders 的 Interface Limitations（限额按 acc_id 计）；文档没有写明多个连接是否共用额度，本次实测表明是共用的
+- **影响**：
+  - 生产环境：SPEC 3.4 规定只有常驻进程连券商、其他命令经 `commands` 表提交，这个设计正好避开了额度被分摊的问题。M4 必须坚持：命令行不得自己连 OpenD 下单或撤单
+  - 测试：sim 测试接连新建 broker 时会互相挤占额度。办法有两种（待你决定）：同一进程里按 acc_id 共用一个限流器（进程级注册表）；跨进程的（M3 重启验收的子进程）只能等满一个窗口再开始
+  - 两份 M3 验收：异常发生在 `finally` 撤单，会盖掉 `try` 里断言的结果，这次不能算通过。券商数据和验收条件一致（841874 那个 cid 在券商端只有 1 张单；重启后本地 NEW 对应券商 SUBMITTED），但要周一常规时段单独重跑。建议你在 `finally` 里也处理撤单失败（例如记录后再抛），并在两份 M3 验收之前等满 31 秒，或单独运行
+- **更正**：之前我推测撤单失败是因为订单还在 PENDING_NEW、被闸门拒绝，这个推测是错的。事件记录显示闸门放行了撤单，是券商因额度用完而拒绝。「PENDING_NEW 时的撤单等确认后自动发」仍有意义（halt 时可能有单还没确认），但不是这次失败的原因
+
+#### P9 第一次 `--check`：收盘后下的 DAY 单排队到下一交易日，不会立即过期（P9 部分）
+
+- **结论**：841874、841875 下于美东 16:00:46、16:00:48，比收盘晚几十秒。美东 18:04 查询，两张单都是 `SUBMITTED`，`time_in_force=DAY`、`session=RTH`，最后更新时间仍是下单时刻。缓存查询（refresh_cache=False）和绕过缓存的查询结果相同。`history_order_list_query` 也能查到，状态同样是 `SUBMITTED`。这与 M1 的「夜盘时模拟盘照样接受常规时段的 DAY 单并排队」一致
+- **另外发现**：账户上一共挂着 10 张 `SUBMITTED` 单（841874–841883，16:00:46–16:00:50，US.SPY 限价买 1 股 @ 678.78，全带 `moo:` remark），都是这次 `pytest -m sim` 撤单失败留下的。只有 841874、841875 在 OMS 数据库里，另外 8 张来自直接调用 BrokerPort 的契约测试。你决定不撤：它们会排队到周一开盘、挂一整天、收盘时过期，周一收盘后再查，正好当 10 个 DAY 过期样本。价格比市价低 10%，正常不会成交。这 8 张本地没有记录的单，OMS 每次启动恢复都会报 `unknown_client_order_id`，这是预期行为
+- **依据**：实测
+- **出处**：vendor § Get open Orders、§ Get Historical Orders；`scripts/probe_m3_expiry.py` @ f6104e9（`--check` 模式）
+- **记录**：`recordings/probes/probe_m3_expiry_20261113T230431Z.jsonl`；运行时间 2026-11-13T23:04:31Z（美东 18:04）；SDK 10.12.7208，OpenD 1012
+- **待补**：周一（2026-11-16）美东 16:00 之后对 841874–841883 再跑一次 `--check`，看 DAY 单过期后显示什么状态（DISABLED？CANCELLED_ALL？），有没有推送；周二再查一次，看 24 小时后还能不能查到。之后再定 `mapping.py` 里 DISABLED 的映射。DELETED 需要你在 App 里删一张单再查

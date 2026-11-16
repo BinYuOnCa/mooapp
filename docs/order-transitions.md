@@ -1,9 +1,10 @@
 > 来源：`~/Downloads/TRANSITIONS.md`（2026-11-01），与 `docs/reference/order_state.py`（来自 `~/Downloads/order_state.py`）配套，原样复制。
 > 矩阵按 FIX 语义编写；映射到 Moomoo 订单状态是 M3 的工作（docs/status-mapping.md）。
+> **M3 修改（2026-11-13，你确认）**：新增事件 `RESUBMIT` 和转换 T55（UNKNOWN → PENDING_NEW，确认券商端没有这张单才用同一个 ClOrdID 重发），用来满足 M3「超时重试前先查询，确认不存在才重发」。原文在 UNKNOWN 处的「绝不重发」改为「未经确认不重发」。除此之外与原文一致。
 
 # 订单状态转换矩阵
 
-与 `order_state.py` 一一对应：54 条转换（T01–T54）加 3 条忽略规则（I01–I03），覆盖全部 57 个合法的（状态，事件）组合。
+与 `order_state.py` 一一对应：55 条转换（T01–T55；T55 为 M3 新增）加 3 条忽略规则（I01–I03），覆盖全部 58 个合法的（状态，事件）组合。
 
 ## 记号
 
@@ -30,6 +31,7 @@
     TRIGGER_HIT         # 行情满足触发价
     ACK_TIMEOUT         # 等确认超时 / 会话断开
     STATUS_RESOLVED      # 对账得出结论（OrderStatusRequest 35=H / drop copy）
+    RESUBMIT             # M3 新增：确认券商端不存在后，用同一 ClOrdID 重发
    
     # 用户请求
     CANCEL_REQ                # OrderCancelRequest (35=F)
@@ -121,6 +123,7 @@ Emits 是给资金冻结层、推送层的接口约定；当前 `order_state.py`
 | T52 | PENDING_REPLACE | UNSOLICITED_CANCEL | — | CANCELED | HOLD.Release(剩余), PUSH(原因) |
 | T53 | CANCELED | FILL | cum+q ≤ qty（已撤后迟到的成交） | CANCELED（不变，cum 增加） | LEDGER.Fill, ALERT.LateFill, PUSH |
 | T54 | EXPIRED | FILL | cum+q ≤ qty（已过期后迟到的成交） | EXPIRED（不变，cum 增加） | LEDGER.Fill, ALERT.LateFill, PUSH |
+| T55 | UNKNOWN | RESUBMIT | 上游：已用刷新缓存的查询（`refresh_cache=True`）在宽限期后连续 2 次确认券商端没有该 remark；attempts < 3（M3 新增） | PENDING_NEW（attempts + 1，ClOrdID 不变） | EX.New, TIMER.AckStart, ALERT.Resubmit |
 | I01 | NEW, PARTIALLY_FILLED, PENDING_CANCEL, PENDING_REPLACE, FILLED, CANCELED, EXPIRED | ACK | —（迟到或重复的确认） | 不变（忽略） | — |
 | I02 | FILLED, CANCELED, EXPIRED, REJECTED | CANCEL_REJECT | —（撤单太晚，订单已结束） | 不变（忽略） | — |
 | I03 | FILLED, CANCELED, EXPIRED, REJECTED | REPLACE_REJECT | —（改单太晚，订单已结束） | 不变（忽略） | — |
