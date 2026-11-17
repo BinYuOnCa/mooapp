@@ -17,7 +17,7 @@
 ### M5 验收登记
 
 - [ ] 验收 1（SMTP 密码错 → 交易照常 → 改正后补发）：周二盘中，`test_m5_smtp_wrong_password.py` 先 `-k step1`（密码改错）再 `-k step2`（改回）
-- [ ] 验收 2（5 次部分成交 → 1 封）：`test_m5_partial_fills_one_email.py`，任何时段，邮箱核对
+- [x] 验收 2（5 次部分成交 → 1 封）：2026-11-16 晚 `1 passed`；邮箱只收到 1 封「[mooapp] [SIMULATE] 成交 US.SPY BUY 5/5」，正文「本次合并 5 次成交，累计 5/5」
 - [ ] 验收 3（连续 3 个交易日心跳）：每天 9:00 前在 M5 目录启动 `mooapp run`，9:35 左右 Ctrl-C 让出单实例锁给主目录的 M6 验收；第 3 天 9:30 后跑 `test_m5_heartbeat_3days.py`
 
 | 交易日 | 心跳收到（时刻） | 备注 |
