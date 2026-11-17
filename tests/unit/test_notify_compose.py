@@ -147,3 +147,36 @@ def test_account_numbers_masked():
 def test_subject_carries_env():
     out = comp().on_halt(HaltChanged(True, "x", "cli"), at(0))
     assert "SIMULATE" in out[0].subject
+
+
+# ------------------------------------------------------------------ 显示格式（2026-11-16 你的全局要求：内部 UTC，给人看的一律美东；ADR-0033）
+
+
+def test_fill_email_price_and_time_human_format():
+    c = comp()
+    c.on_order(order(2), at(3))
+    e = c.on_order(order(5, S.FILLED, qty=5, avg="10.000000"), at(4))[0]
+    assert "均价 10.00" in e.body and "10.000000" not in e.body
+    assert "2026-11-17 10:00:03（美东）" in e.body  # T0 = 15:00 UTC = 美东 10:00
+    assert "+00:00" not in e.body
+
+
+def test_price_keeps_needed_decimals():
+    c = comp()
+    c.on_order(order(1), at(0))
+    e = c.on_order(order(100, S.FILLED, avg="745.755"), at(1))[0]
+    assert "均价 745.755" in e.body
+
+
+def test_all_email_times_are_eastern():
+    c = comp()
+    emails = [
+        *c.on_risk_rejected(RiskRejected("whitelist", "x", "place", "cli", "cli", None, "US.MSFT"), at(0)),
+        *c.on_halt(HaltChanged(True, "x", "cli"), at(0)),
+        *c.on_alert(Alert("daily_loss_halt", "x"), at(0)),
+    ]
+    c.on_alert(Alert("poll_error", "x"), at(0))
+    emails += c.tick(at(30 * 60))
+    for e in emails:
+        assert "+00:00" not in e.body and "T15:" not in e.body, e.body
+        assert "（美东）" in e.body
