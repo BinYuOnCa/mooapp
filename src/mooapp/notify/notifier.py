@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 from mooapp.broker.port import MarketDataPort
 from mooapp.clock import Clock
-from mooapp.common import Env
+from mooapp.common import Env, et_str
 from mooapp.config.models import EmailCfg
 from mooapp.notify.compose import Composer
 from mooapp.notify.mailer import Email, Mailer, MailError
@@ -180,7 +180,7 @@ class Notifier:
                 self._mailer.send(Email(rec.kind, rec.subject, rec.body), rec.recipients)
             except MailError as e:
                 nxt = now + _backoff(rec.attempts)
-                log.error("邮件 %s 发送失败（第 %d 次），%s 重试：%s", rec.id, rec.attempts + 1, nxt.isoformat(), e)
+                log.error("邮件 %s 发送失败（第 %d 次），%s 重试：%s", rec.id, rec.attempts + 1, et_str(nxt), e)
                 with self._store.transaction():
                     self._store.mark_email_failed(rec.id, str(e), nxt, now)
                 self._bus.publish(Alert("email_send_failed", f"邮件 {rec.id}（{rec.kind}）发送失败：{e}"))
@@ -209,6 +209,6 @@ class Notifier:
             return None
         late = first and now - due > LATE_GRACE
         status = self._status()
-        lines = [f"环境 {self._env.value}", f"时间 {now.astimezone(MARKET_TZ):%Y-%m-%d %H:%M:%S}（美东）", *(f"{k}: {v}" for k, v in status.items())]
+        lines = [f"环境 {self._env.value}", f"时间 {et_str(now)}", *(f"{k}: {v}" for k, v in status.items())]
         subject = f"[{self._env.value}] 系统正常 {today.isoformat()}" + ("（迟到）" if late else "")
         return Email("heartbeat", subject, "\n".join(lines)), key

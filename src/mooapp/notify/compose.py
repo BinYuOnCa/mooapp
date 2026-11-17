@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from mooapp.common import Env, mask_account
+from mooapp.common import Env, et_str, mask_account, price_str
 from mooapp.config.models import EmailCfg
 from mooapp.notify.mailer import Email
 from mooapp.oms.events import Alert
@@ -78,25 +78,25 @@ class Composer:
             "fill",
             self._subject(f"成交 {o.symbol} {o.side.value} {o.cum_qty}/{o.qty}"),
             f"订单 {cid}（券商 {o.broker_order_id or '-'}）\n"
-            f"本次合并 {w.count} 次成交，累计 {o.cum_qty}/{o.qty}，均价 {o.avg_px}\n"
-            f"状态 {o.status.value}（窗口自 {w.first.isoformat()}）",
+            f"本次合并 {w.count} 次成交，累计 {o.cum_qty}/{o.qty}，均价 {price_str(o.avg_px)}\n"
+            f"状态 {o.status.value}（窗口自 {et_str(w.first)}）",
         )
 
     # ------------------------------------------------------------------ 立即发
 
     def on_risk_rejected(self, e: RiskRejected, now: datetime) -> list[Email]:
         return [Email("risk_rejected", self._subject(f"拒单 {e.rule} {e.symbol or ''}".rstrip()),
-                      f"{e.reason}\n动作 {e.action}，来源 {e.source}，发起 {e.actor}，订单 {e.client_order_id or '-'}\n时间 {now.isoformat()}")]  # fmt: skip
+                      f"{e.reason}\n动作 {e.action}，来源 {e.source}，发起 {e.actor}，订单 {e.client_order_id or '-'}\n时间 {et_str(now)}")]  # fmt: skip
 
     def on_halt(self, e: HaltChanged, now: datetime) -> list[Email]:
         what = "HALT" if e.halted else "RESUME"
-        return [Email("halt", self._subject(f"{what}：{e.reason}"), f"{what} by {e.actor}\n原因 {e.reason}\n时间 {now.isoformat()}")]
+        return [Email("halt", self._subject(f"{what}：{e.reason}"), f"{what} by {e.actor}\n原因 {e.reason}\n时间 {et_str(now)}")]
 
     def on_alert(self, a: Alert, now: datetime) -> list[Email]:
         if a.kind.startswith("email_"):
             return []
         if a.kind in CRITICAL_ALERTS:
-            body = f"{a.message}\n订单 {a.client_order_id or '-'}\n时间 {now.isoformat()}"
+            body = f"{a.message}\n订单 {a.client_order_id or '-'}\n时间 {et_str(now)}"
             if a.details:
                 body += "\n" + _details(a.details)
             return [Email("alert", self._subject(f"报警 {a.kind}"), body)]
@@ -128,7 +128,7 @@ class Composer:
 
     def _flush_digest(self, now: datetime) -> Email:
         total = sum(self._digest.values())
-        lines = [f"{self._digest_start.isoformat() if self._digest_start else ''} ～ {now.isoformat()} 共 {total} 条报警："]
+        lines = [f"{et_str(self._digest_start) if self._digest_start else ''} ～ {et_str(now)} 共 {total} 条报警："]
         for kind, n in self._digest.most_common():
             lines.append(f"{kind} × {n}")
             lines.extend(f"    例：{m}" for m in self._examples.get(kind, []))

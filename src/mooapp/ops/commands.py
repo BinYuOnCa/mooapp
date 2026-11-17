@@ -20,7 +20,7 @@ from typing import Any
 
 from mooapp.broker.port import InvalidOrder, OrderRequest, new_client_order_id
 from mooapp.clock import Clock
-from mooapp.common import MooappError, OrderKind, Side, Source
+from mooapp.common import MooappError, OrderKind, Side, Source, et_str
 from mooapp.oms.events import Alert, EventBus
 from mooapp.oms.store import COMMAND_FINAL, Store
 from mooapp.ops.resume_auth import ResumeAuthError, verify
@@ -92,7 +92,7 @@ class CommandProcessor:
         expires = payload.get("expires_at")
         if kind in EXPIRING_KINDS and expires is not None and self.clock.now() > datetime.fromisoformat(expires):
             log.warning("命令 %s 已过期（截止 %s），不执行", kind, expires)
-            return {"allowed": False, "rule": "expired", "reason": f"命令行已在 {expires} 放弃等待，不再执行",
+            return {"allowed": False, "rule": "expired", "reason": f"命令行已在 {et_str(datetime.fromisoformat(expires))} 放弃等待，不再执行",
                     "client_order_id": payload.get("client_order_id"), "rule_id": payload.get("rule_id"), "status": None}  # fmt: skip
         if kind == "place":
             try:
