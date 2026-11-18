@@ -1,0 +1,6 @@
+# 已验证可用的 OpenD 与 SDK 版本（ADR-0035）。版本变化后：先重跑 `pytest -m sim tests/contract` 与相关探针，
+# 确认 learnings 里的结论仍成立，再更新这里并提交，提交说明写明依据。由你更新。
+opend = "1012"
+sdk = "10.12.7208"
+verified_at = 2026-11-16
+evidence = "2026-11-16 模拟盘：契约测试 17 passed；探针 P9（DAY 过期）、P10/P10d（today_pl_val、can_sell_qty）、P11（报价推送）、P12（持仓缓存）、P13（收盘前后）、P8（交易日历）"

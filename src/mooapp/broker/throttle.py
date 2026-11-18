@@ -18,6 +18,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from mooapp.broker.port import BrokerFill, BrokerOrder, BrokerPort, Cash, OrderRequest, Position, Quote, RateLimited
 from mooapp.clock import Clock, SystemClock
@@ -174,6 +175,13 @@ class ThrottledBroker:
 
     def close(self) -> None:
         self.inner.close()
+
+    # ADR-0035
+    def on_drift(self, cb: Callable[[Any], None]) -> None:
+        self.inner.on_drift(cb)  # type: ignore[attr-defined]
+
+    def server_version(self) -> str:
+        return self.inner.server_version()  # type: ignore[attr-defined]
 
     # 行情（inner 同时实现 MarketDataPort）
     def snapshot(self, symbols: list[str]) -> list[Quote]:

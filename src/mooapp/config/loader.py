@@ -22,12 +22,14 @@ from mooapp.config.models import (
     RiskLimits,
     Secrets,
     Settings,
+    VerifiedVersions,
 )
 
 DEFAULT_SETTINGS = Path("config/settings.toml")
 DEFAULT_BROKER = Path("config/broker.toml")
 DEFAULT_DB = Path("config/db.toml")
 DEFAULT_DB_LOCAL = Path("config/db.local.toml")
+DEFAULT_VERIFIED = Path("config/verified_versions.toml")
 DEFAULT_SECRETS = Path.home() / ".config" / "mooapp" / "secrets.toml"
 
 LOOPBACK_TCP_HOST = "127.0.0.1"
@@ -77,6 +79,11 @@ def _validate(model: type[M], data: dict, path: Path, prefix: str = "") -> M:
 
 def load_settings(path: Path = DEFAULT_SETTINGS) -> Settings:
     return _validate(Settings, _read_toml(path), path)
+
+
+def load_verified_versions(path: Path = DEFAULT_VERIFIED) -> VerifiedVersions:
+    """ADR-0035：已验证的 OpenD 与 SDK 版本。"""
+    return _validate(VerifiedVersions, _read_toml(path), path)
 
 
 def load_broker_cfg(path: Path = DEFAULT_BROKER) -> BrokerCfg:

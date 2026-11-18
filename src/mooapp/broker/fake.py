@@ -388,6 +388,15 @@ class FakeBroker:
             self._record("lock")
             self._unlocked = False
 
+    # ADR-0035：FakeBroker 不做形状检测；版本可由测试设置
+    server_ver = "fake"
+
+    def on_drift(self, cb: Callable[[Any], None]) -> None:
+        self._record("on_drift")
+
+    def server_version(self) -> str:
+        return self.server_ver
+
     def close(self) -> None:
         with self._lock:
             self._record("close")

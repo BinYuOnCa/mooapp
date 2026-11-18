@@ -181,6 +181,13 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
         jstore = JournaledStore(store, journal, clock.now)
         broker = open_broker(env, load_broker_cfg(config_dir / "broker.toml"), clock, record_dir=record_dir)
         bus = EventBus()
+        # ADR-0035：版本闸门（SIMULATE 报警继续，REAL 拒绝）；数据形状漂移报警
+        from mooapp.broker.opend import sdk_version
+        from mooapp.config.loader import load_verified_versions
+        from mooapp.ops.versions import version_diffs, version_gate
+
+        version_gate(env, version_diffs(broker.server_version(), sdk_version(), load_verified_versions(config_dir / "verified_versions.toml")), bus)
+        broker.on_drift(lambda d: bus.publish(Alert(d.kind, d.message, details={"api": d.api, "name": d.name, "value": d.value})))
         oms = OMS(store=jstore, broker=broker, bus=bus, clock=clock, env=env, journal=journal)  # type: ignore[arg-type]
         pump = EventPump(oms, threaded=True)
         pump.attach(broker)

@@ -90,6 +90,7 @@ def doctor(ctx: typer.Context) -> None:
         secrets_path=d.secrets_path,
         db_check=lambda: d.db_check(db_cfg, d.config_dir / "db.local.toml"),
         exposure_check=lambda: d.exposure_check(db_cfg, broker_cfg),
+        verified=_verified_or_none(d.config_dir / "verified_versions.toml"),
     )
     typer.echo(doctor_mod.render(results))
     raise typer.Exit(doctor_mod.exit_code(results))
@@ -434,3 +435,13 @@ def rule_list(ctx: typer.Context, all_: Annotated[bool, typer.Option("--all", he
             f"{r.id:<20} {r.symbol:<8} {r.status:<9} 止损 {st.get('stop_price') or '-':<8} 止盈 {st.get('take_price') or '-':<8} "
             f"买 {st.get('bought', 0)} 卖 {st.get('sold', 0)}"
         )
+
+
+def _verified_or_none(path: Path):  # type: ignore[no-untyped-def]
+    """ADR-0035：读不到 verified_versions.toml 时返回 None（doctor 显示 WARN，不失败）。"""
+    from mooapp.config.loader import load_verified_versions
+
+    try:
+        return load_verified_versions(path)
+    except ConfigError:
+        return None

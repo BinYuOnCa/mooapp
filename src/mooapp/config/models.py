@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -141,3 +142,12 @@ class Secrets(BaseModel):
     def _placeholder_is_none(cls, v: object) -> object:
         # 模板 secrets.example.toml 里 real_acc_id = 0 是占位值，视为未填
         return None if v == 0 else v
+
+
+class VerifiedVersions(_Strict):
+    """config/verified_versions.toml（ADR-0035）：已验证可用的 OpenD 与 SDK 版本。由你在重跑契约测试与探针后更新。"""
+
+    opend: str = Field(min_length=1)
+    sdk: str = Field(min_length=1)
+    verified_at: date
+    evidence: str = Field(min_length=1)

@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, Protocol
 
 from mooapp.common import Env, MooappError, OrderKind, Side
 
@@ -232,6 +232,9 @@ class BrokerPort(Protocol):
     def unlock(self, password: str) -> None: ...
     def lock(self) -> None: ...
     def close(self) -> None: ...
+    # ADR-0035：数据形状漂移回调；OpenD 版本（版本闸门）
+    def on_drift(self, cb: Callable[[Any], None]) -> None: ...
+    def server_version(self) -> str: ...
 
 
 class MarketDataPort(Protocol):

@@ -7,6 +7,27 @@
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
 
+
+## API 行为守卫（已确认 2026-11-18；分支 `fix/api-guard`，worktree `.claude/worktrees/api-guard`）
+
+**状态（2026-11-18 凌晨）**：实现完成，`pytest` 814 passed，`pytest -m pg` 43 passed。待你：`uv run mooapp doctor` 看「版本已验证」一项；合并顺序见合并计划（与 M5、M7、M8 都会碰 `ops/run.py`、`ops/cli.py`、`broker/*`）
+
+目的：Moomoo API / OpenD 的行为可能随版本变化；把「环境变了」「数据形状变了」变成看得见的报警，REAL 不在未验证的版本上运行。决定见 ADR-0035（都按建议）。
+
+- **A 版本闸门**：`config/verified_versions.toml`（OpenD 1012、SDK 10.12.7208，依据：契约测试与 P9–P13）；`mooapp doctor` 不一致 WARN；`mooapp run` 启动比较：SIMULATE 报警 `api_version_changed` 继续，REAL 拒绝启动
+- **C 新字段 / 新枚举报警**：`broker/drift.py` 用探针录制的字段集合（按接口）与 vendor 文档的枚举取值做基线；`MoomooBroker` 在每次解析返回数据、每条推送时比较，报 `api_new_field` / `api_field_missing` / `api_new_enum`（每进程每项一次，只报警）；常驻进程接到事件总线（M5 合并后进汇总邮件）
+- 文件：ADR-0035、`config/verified_versions.toml`、`config/models.py`、`config/loader.py`、`broker/drift.py`、`broker/moomoo.py`、`broker/throttle.py`、`broker/fake.py`、`broker/port.py`、`ops/doctor.py`、`ops/run.py`；测试先写、先失败
+
+## M9 计划的输入（2026-11-18 记录）
+
+- **B 每天开盘前的金丝雀检查**：开盘前自动跑一组只读契约（账户、持仓、当日 / 历史订单、交易日历、快照的字段、类型、枚举）；可选开盘后一张远离市价的单即撤，检查推送顺序。不通过就发邮件并当天自动 halt（只许撤单）
+- **D 定期重跑探针，自动对比基线**：把 P9、P10d、P12、P13 等关键结论写成可比较的期望值，每月或版本变化时重跑并自动比较
+- 本周的 crontab + `var/unattended/daily.sh`（启动 / 停止常驻进程、M6 验收、M7 对账、OpenD 未就绪时重试）是 M9 的雏形
+
+## M9 之后的可选升级（2026-11-18 记录，M9 完成后再决定）
+
+- **E vendor 文档变化提醒**：定期重新抓取 Moomoo OpenAPI 文档，与 `docs/vendor/` 的快照逐节比较，有改动就提醒（邮件），并列出改动涉及的接口与我们依赖它的代码、learnings 条目。前提：需要访问外网（Moomoo 文档站点），要你批准新域名；抓取频率与范围另行决定
+
 ## 修复计划（已确认 2026-11-16，分支 `fix/Post_Milestone_3`）
 
 周一验收中发现的两个问题。你的决定：计划 1 选 A（`min` 公式 + ADR-0031）；计划 2 照做；SPEC 由 Claude 改；**先做计划 2**。每份先提交失败的测试，再提交实现。

@@ -36,7 +36,7 @@ from mooapp.config.loader import (
     load_db_local,
     load_secrets,
 )
-from mooapp.config.models import BrokerCfg, DbCfg, Settings
+from mooapp.config.models import BrokerCfg, DbCfg, Settings, VerifiedVersions
 
 OPEND_TIMEOUT = 5.0  # 你确认的第 3 点
 DB_CONNECT_TIMEOUT = 5
@@ -68,7 +68,19 @@ def _one_line(text: object) -> str:
 # ------------------------------------------------------------------ 1–5：OpenD
 
 
-def _opend_checks(sess: OpenDSession, settings: Settings, broker_cfg: BrokerCfg) -> list[CheckResult]:
+def version_check(opend: str, sdk: str, verified: VerifiedVersions | None) -> CheckResult:
+    """ADR-0035：与已验证版本一致 PASS；不一致或没有记录 WARN（doctor 不因此失败）。"""
+    from mooapp.ops.versions import version_diffs
+
+    if verified is None:
+        return CheckResult("版本已验证", Status.WARN, f"OpenD {opend}，SDK {sdk}；没有 config/verified_versions.toml，无法比较")
+    diffs = version_diffs(opend, sdk, verified)
+    if not diffs:
+        return CheckResult("版本已验证", Status.PASS, f"OpenD {opend}，SDK {sdk}（已验证 {verified.verified_at}）")
+    return CheckResult("版本已验证", Status.WARN, f"与已验证版本不同：{'；'.join(diffs)}；请重跑契约测试与探针后更新 verified_versions.toml")
+
+
+def _opend_checks(sess: OpenDSession, settings: Settings, broker_cfg: BrokerCfg, verified: VerifiedVersions | None = None) -> list[CheckResult]:
     out: list[CheckResult] = []
     acc_id = broker_cfg.simulate_acc_id
 
@@ -76,6 +88,7 @@ def _opend_checks(sess: OpenDSession, settings: Settings, broker_cfg: BrokerCfg)
     try:
         gs = sess.global_state()
         out.append(CheckResult("版本", Status.PASS, f"OpenD {gs.server_ver}，SDK {sdk_version()}"))
+        out.append(version_check(gs.server_ver, sdk_version(), verified))
     except BrokerError as e:
         out.append(CheckResult("版本", Status.FAIL, f"{_one_line(e)}；SDK {sdk_version()}"))
 
@@ -309,6 +322,7 @@ def run_doctor(
     db_check: Callable[[], list[CheckResult]],
     exposure_check: Callable[[], list[CheckResult]],
     timeout: float = OPEND_TIMEOUT,
+    verified: VerifiedVersions | None = None,
 ) -> list[CheckResult]:
     results: list[CheckResult] = []
     try:
@@ -324,7 +338,7 @@ def run_doctor(
         )
     else:
         try:
-            results += _opend_checks(sess, settings, broker_cfg)
+            results += _opend_checks(sess, settings, broker_cfg, verified)
         finally:
             sess.close()
     results.append(check_secrets(secrets_path))
