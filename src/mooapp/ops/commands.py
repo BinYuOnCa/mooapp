@@ -9,6 +9,8 @@
 - M4 审查 #7、ADR-0030：place / cancel / rule_add / rule_cancel 带 expires_at（命令行等待的截止时间），过期才被取出的命令不执行；
   启动时把上一个进程遗留的 running 命令标为 error
 - M4 审查 #10（ADR-0029）：resume 必须带 ops/resume_auth 的签名
+- M8（ADR-0034）：approve 必须带 ops/approve_auth 的签名，批准 Agent 的提议后以 source=AGENT 交给闸门（规则交给规则引擎）；
+  reject 不需要签名；auto_approve_pending 只在 SIMULATE 且开关打开时由常驻进程在进程内批准
 """
 
 from __future__ import annotations
@@ -20,17 +22,20 @@ from typing import Any
 
 from mooapp.broker.port import InvalidOrder, OrderRequest, new_client_order_id
 from mooapp.clock import Clock
-from mooapp.common import MooappError, OrderKind, Side, Source
+from mooapp.common import Env, MooappError, OrderKind, Side, Source
 from mooapp.oms.events import Alert, EventBus
-from mooapp.oms.store import COMMAND_FINAL, Store
+from mooapp.oms.store import COMMAND_FINAL, ApprovalRecord, Store
+from mooapp.ops.approve_auth import ApproveAuthError
+from mooapp.ops.approve_auth import verify as verify_approve
 from mooapp.ops.resume_auth import ResumeAuthError, verify
 from mooapp.risk.gate import Intent, RiskGate
 
 log = logging.getLogger(__name__)
 HEARTBEAT_KEY = "runner_heartbeat"
 RESUME_NONCE_PREFIX = "resume_nonce:"  # kv：用过的 resume 随机数
+APPROVE_NONCE_PREFIX = "approve_nonce:"  # kv：用过的 approve 随机数（ADR-0034）
 EXPIRING_KINDS = frozenset({"place", "cancel", "rule_add", "rule_cancel"})  # halt、resume 不过期（ADR-0030）
-KINDS = frozenset({"place", "cancel", "halt", "resume", "rule_add", "rule_cancel"})
+KINDS = frozenset({"place", "cancel", "halt", "resume", "rule_add", "rule_cancel", "approve", "reject"})
 
 
 class RunnerNotRunning(MooappError):
@@ -119,12 +124,95 @@ class CommandProcessor:
                 r = self.engine.add(str(payload.get("yaml") or ""), actor=actor)
                 return {"allowed": r.allowed, "rule_id": r.rule_id, "reason": r.reason, "entry_cid": r.entry_cid}
             return self.engine.cancel(str(payload.get("rule_id")), actor=actor)
+        if kind == "approve":
+            approval_id = self._check_approve(payload)  # 交互确认在命令行进程里完成，签名证明命令来自那里（ADR-0034）
+            return self._execute_approval(approval_id, actor)
+        if kind == "reject":
+            return self._reject_approval(str(payload.get("approval_id")), str(payload.get("reason") or "人工拒绝"))
         if kind == "halt":
             r = self.gate.halt(str(payload.get("reason") or "手动 halt"), actor=actor)
             return {"halted": True, "cancel_sent": r.cancel_sent, "deferred": r.deferred, "failed": r.failed}
         self._check_resume(payload)  # 交互确认在命令行进程里完成，签名证明命令来自那里（ADR-0029）
         self.gate.resume(actor=actor)
         return {"halted": False}
+
+    # ------------------------------------------------------------------ M8：Agent 提议的批准与拒绝
+
+    def _check_approve(self, payload: dict[str, Any]) -> str:
+        try:
+            approval_id, nonce = verify_approve(self._resume_key, payload, self.clock.now())
+            key = APPROVE_NONCE_PREFIX + nonce
+            if self.store.get_kv(key) is not None:
+                raise ApproveAuthError("approve 随机数已用过（重放）")
+        except ApproveAuthError as e:
+            self.bus.publish(Alert("approve_rejected", f"拒绝 approve：{e}"))
+            raise
+        with self.store.transaction():
+            self.store.set_kv(key, self.clock.now().isoformat())
+        return approval_id
+
+    def _pending(self, approval_id: str) -> ApprovalRecord | dict[str, Any]:
+        """待批准且未过期的提议；否则返回给命令行的结果（不执行）。过期的顺手标为 expired。"""
+        a = self.store.get_approval(approval_id)
+        if a is None:
+            raise ValueError(f"没有提议 {approval_id}")
+        if a.status != "pending":
+            return {"approved": False, "reason": f"提议 {approval_id} 已是 {a.status}，不能再批准"}
+        now = self.clock.now()
+        if now >= a.expires_at:
+            with self.store.transaction():
+                self.store.update_approval(a.id, "expired", now, {"reason": "批准时已过期"})
+            return {"approved": False, "reason": f"提议 {approval_id} 已过期（{a.expires_at.isoformat()}），不能批准"}
+        return a
+
+    def _execute_approval(self, approval_id: str, actor: str) -> dict[str, Any]:
+        a = self._pending(approval_id)
+        if isinstance(a, dict):
+            return a
+        who = f"{a.caller}（批准：{actor}）"
+        if a.kind == "order":
+            p = a.payload
+            req = OrderRequest(
+                client_order_id=new_client_order_id(),
+                symbol=p["symbol"],
+                side=Side(p["side"]),
+                qty=p["qty"],
+                kind=OrderKind.LIMIT if p.get("limit_price") is not None else OrderKind.MARKET,
+                limit_price=Decimal(p["limit_price"]) if p.get("limit_price") is not None else None,
+            )
+            result = _decision(self.gate.submit(Intent(Source.AGENT, "place", request=req, actor=who)), req.client_order_id)
+        else:
+            if self.engine is None:
+                raise RuntimeError("规则引擎未启用，不能执行规则提议")
+            r = self.engine.add(str(a.payload["yaml"]), actor=who)
+            result = {"allowed": r.allowed, "rule_id": r.rule_id, "reason": r.reason, "entry_cid": r.entry_cid}
+        with self.store.transaction():
+            self.store.update_approval(a.id, "approved", self.clock.now(), result)
+        return {"approved": True, **result}
+
+    def _reject_approval(self, approval_id: str, reason: str) -> dict[str, Any]:
+        a = self.store.get_approval(approval_id)
+        if a is None:
+            raise ValueError(f"没有提议 {approval_id}")
+        if a.status != "pending":
+            return {"rejected": False, "reason": f"提议 {approval_id} 已是 {a.status}"}
+        with self.store.transaction():
+            self.store.update_approval(a.id, "rejected", self.clock.now(), {"reason": reason})
+        return {"rejected": True}
+
+    def auto_approve_pending(self, env: Env, enabled: bool) -> int:
+        """Q9：SIMULATE 且 [agent] auto_approve_simulate = true 时，常驻进程在进程内批准待批准的提议（不经命令表）。
+        REAL 永远不自动批准。返回批准的个数。"""
+        if not enabled or env is not Env.SIMULATE:
+            return 0
+        n = 0
+        now = self.clock.now()
+        for a in self.store.list_approvals(status="pending"):
+            if a.expires_at <= now:
+                continue
+            self._execute_approval(a.id, "auto_approve_simulate")
+            n += 1
+        return n
 
     def _check_resume(self, payload: dict[str, Any]) -> None:
         try:

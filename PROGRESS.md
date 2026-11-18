@@ -12,6 +12,8 @@
 
 目标：SPEC 8 节 M8 四条验收（Claude Code 接入 MCP 走通「查持仓 → 提议 → 批准 → 成交通知」；REAL 下未批准不发出；提示注入测试；策略文字翻译成 YAML 与手写一致）。与 M5、M7 并行开发。
 
+**状态（2026-11-18 凌晨）**：实现完成，`pytest` 856 passed，`pytest -m pg` 45 passed。新增 `src/mooapp/agent/`（approvals、tools、rules、server）、`ops/approve_auth.py`、迁移 `0006_m8.sql`（approvals、agent_calls）、命令 `mooapp approve` / `reject` / `agent serve`；常驻进程处理 approve / reject 与 `auto_approve_pending`。与计划的小差异：多一个只读工具 `list_my_proposals`（Agent 查自己提议的状态和执行结果，走通验收 1 需要）。待你：在 M8 目录 `uv run mooapp db migrate`（0006）→ 验收草稿复制进 `tests/acceptance/`；验收 1 要等 M5 合并（成交邮件）
+
 ### 你的决定（2026-11-17）
 
 1. 只读工具：MCP server 自己开**只读** OpenD 连接（同 `mooapp eod`），只查不写

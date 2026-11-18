@@ -24,6 +24,8 @@ from mooapp.oms.state import Order, OrdStatus
 from mooapp.oms.store import (
     COMMAND_FINAL,
     AuditRecord,
+    AgentCallRecord,
+    ApprovalRecord,
     CommandRecord,
     EventRecord,
     FillRecord,
@@ -36,6 +38,7 @@ from mooapp.oms.store import (
 )
 
 T = TypeVar("T")
+_APPROVAL_COLS = "id, kind, payload, reason, caller, status, created_at, expires_at, decided_at, result"
 
 _ORDER_COLS = (
     "client_order_id, broker_order_id, source, symbol, side, kind, qty, limit_price, cl_ord_id, status, base_status,"
@@ -239,6 +242,50 @@ class PostgresStore:
     def recon_events(self) -> list[ReconRecord]:
         rows = self._run(lambda c: c.execute("SELECT kind, details, client_order_id, ts FROM recon_events ORDER BY id").fetchall())
         return [ReconRecord(r["kind"], r["details"], r["client_order_id"], r["ts"]) for r in rows]
+
+    # ------------------------------------------------------------------ M8：approvals、agent_calls
+
+    def insert_approval(self, a: ApprovalRecord) -> None:
+        self._run(
+            lambda c: c.execute(
+                f"INSERT INTO approvals ({_APPROVAL_COLS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (a.id, a.kind, Jsonb(a.payload), a.reason, a.caller, a.status, a.created_at, a.expires_at, a.decided_at,
+                 None if a.result is None else Jsonb(a.result)),
+            )
+        )  # fmt: skip
+
+    def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        r = self._run(lambda c: c.execute(f"SELECT {_APPROVAL_COLS} FROM approvals WHERE id = %s", (approval_id,)).fetchone())
+        return ApprovalRecord(**r) if r else None
+
+    def update_approval(self, approval_id: str, status: str, decided_at: Any, result: dict[str, Any] | None) -> None:
+        def go(c: psycopg.Connection[Any]) -> None:
+            cur = c.execute(
+                "UPDATE approvals SET status = %s, decided_at = %s, result = %s WHERE id = %s",
+                (status, decided_at, None if result is None else Jsonb(result), approval_id),
+            )
+            if cur.rowcount != 1:
+                raise StoreError(f"approvals 没有 {approval_id}")
+
+        self._run(go)
+
+    def list_approvals(self, status: str | None = None, since: Any = None) -> list[ApprovalRecord]:
+        q = (f"SELECT {_APPROVAL_COLS} FROM approvals WHERE (%s::text IS NULL OR status = %s) "
+             "AND (%s::timestamptz IS NULL OR created_at >= %s) ORDER BY created_at, id")  # fmt: skip
+        rows = self._run(lambda c: c.execute(q, (status, status, since, since)).fetchall())
+        return [ApprovalRecord(**r) for r in rows]
+
+    def append_agent_call(self, tool: str, args: dict[str, Any], result: dict[str, Any], caller: str, ok: bool, ts: Any) -> None:
+        self._run(
+            lambda c: c.execute(
+                "INSERT INTO agent_calls (tool, args, result, caller, ok, ts) VALUES (%s, %s, %s, %s, %s, %s)",
+                (tool, Jsonb(args), Jsonb(result), caller, ok, ts),
+            )
+        )
+
+    def agent_calls(self) -> list[AgentCallRecord]:
+        rows = self._run(lambda c: c.execute("SELECT tool, args, result, caller, ok, ts FROM agent_calls ORDER BY id").fetchall())
+        return [AgentCallRecord(**r) for r in rows]
 
     # ------------------------------------------------------------------ kv
 
