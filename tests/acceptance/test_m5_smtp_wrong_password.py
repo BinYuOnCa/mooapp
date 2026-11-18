@@ -12,6 +12,7 @@ import pytest
 from mooapp.common import Env
 from mooapp.ops.commands import CommandClient
 from mooapp.ops.run import build_runtime
+from mooapp.common import et_str
 
 pytestmark = pytest.mark.sim
 REPO = Path(__file__).resolve().parents[2]
@@ -49,7 +50,7 @@ def test_step1_wrong_password_trading_continues():
         assert wait(lambda: rt.oms.get(cid).status.value == "CANCELED", 30)
         assert wait(lambda: any(e.kind == "risk_rejected" for e in failed_pending(rt)), 30), "拒单邮件应发送失败并留在 outbox"
         for e in failed_pending(rt):
-            print(f"\noutbox #{e.id} {e.kind} 第 {e.attempts} 次失败：{e.last_error}；下次 {e.next_attempt_at}")
+            print(f"\noutbox #{e.id} {e.kind} 第 {e.attempts} 次失败：{e.last_error}；下次 {et_str(e.next_attempt_at) }")
     finally:
         rt.stop()
 
