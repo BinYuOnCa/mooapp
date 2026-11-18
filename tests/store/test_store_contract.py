@@ -204,6 +204,34 @@ def test_net_fill_qty_by_symbol(store):
     assert store.net_fill_qty_by_symbol() == {"US.SPY": 70, "US.QQQ": 5}
 
 
+def test_approvals_roundtrip(store):
+    """M8：approvals（提议、状态、过期、结果）；按状态与创建时间查询。"""
+    from mooapp.oms.store import ApprovalRecord
+
+    a = ApprovalRecord("ap1", "order", {"symbol": "US.SPY", "qty": 1}, "理由", "agent:mcp", "pending", T, T + timedelta(minutes=30), None, None)
+    b = replace(a, id="ap2", kind="rule", payload={"yaml": "id: x"}, created_at=T + timedelta(minutes=1))
+    with store.transaction():
+        store.insert_approval(a)
+        store.insert_approval(b)
+    assert store.get_approval("ap1") == a and store.get_approval("zzz") is None
+    with store.transaction():
+        store.update_approval("ap1", "approved", T + timedelta(minutes=2), {"allowed": True})
+    got = store.get_approval("ap1")
+    assert got.status == "approved" and got.result == {"allowed": True} and got.decided_at == T + timedelta(minutes=2)
+    assert [x.id for x in store.list_approvals()] == ["ap1", "ap2"]
+    assert [x.id for x in store.list_approvals(status="pending")] == ["ap2"]
+    assert [x.id for x in store.list_approvals(since=T + timedelta(seconds=30))] == ["ap2"]
+
+
+def test_agent_calls_append_only_list(store):
+    with store.transaction():
+        store.append_agent_call("get_positions", {}, {"rows": []}, "agent:mcp", True, T)
+        store.append_agent_call("propose_order", {"qty": 1}, {"error": "x"}, "agent:mcp", False, T + timedelta(seconds=1))
+    calls = store.agent_calls()
+    assert [(c.tool, c.ok) for c in calls] == [("get_positions", True), ("propose_order", False)]
+    assert calls[1].args == {"qty": 1} and calls[1].result == {"error": "x"} and calls[0].caller == "agent:mcp"
+
+
 def test_recon_events(store):
     with store.transaction():
         store.append_recon("external_order", {"broker_order_id": "555"}, None, T)

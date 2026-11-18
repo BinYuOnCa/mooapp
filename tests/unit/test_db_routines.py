@@ -14,6 +14,7 @@ MIGRATIONS = REPO / "db" / "migrations"
 OMS_TABLES = {
     "orders", "order_events", "fills", "recon_events", "journal_applied",
     "rules", "approvals", "commands", "audit", "kv",
+    "rule_orders", "rule_events", "agent_calls",  # M6b、M8
 }
 _WRITE = re.compile(
     r"\b(?:insert\s+into|update|delete\s+from|truncate(?:\s+table)?|merge\s+into|copy)\s+(?:only\s+)?(?:[a-z_]+\.)?\"?([a-z_]+)\"?",
