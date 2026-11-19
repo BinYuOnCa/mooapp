@@ -112,3 +112,29 @@ def test_build_runtime_wires_notifier_with_raw_store():
     assert calls
     kw = {k.arg: k.value for k in calls[0].keywords}
     assert isinstance(kw.get("store"), ast.Name) and kw["store"].id == "store"
+
+
+# ------------------------------------------------------------------ 合并 api-guard 后：启动报警在通知器订阅之后发出
+
+
+def test_startup_alerts_published_after_notifier_subscribes():
+    """ADR-0035 的 SIMULATE 版本报警在 build_runtime 里产生，要等通知器订阅后再发，否则进不了邮件。"""
+    from mooapp.oms.events import Alert
+
+    class Subscribing:
+        def __init__(self, bus):
+            self.bus, self.got = bus, []
+
+        def start(self):
+            self.bus.subscribe(Alert, self.got.append)
+
+        def stop(self):
+            pass
+
+    rt = runtime()
+    rt.notifier = Subscribing(rt.bus)
+    rt.startup_alerts = [Alert("api_version_changed", "OpenD 1012 → 1013")]
+    rt.start()
+    rt.stop()
+    assert [a.kind for a in rt.notifier.got if a.kind == "api_version_changed"] == ["api_version_changed"]
+

@@ -240,4 +240,16 @@ def test_runtime_wires_drift_and_version_gate():
     names = {n.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Attribute)} | {
         n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)
     }
-    assert "on_drift" in names and "version_gate" in names and "version_diffs" in names
+    assert "on_drift" in names and "version_alerts" in names and "version_diffs" in names
+    assert "startup_alerts" in names  # SIMULATE 的版本报警交给 Runtime，通知器订阅后再发
+    assert "version_gate" not in names  # build_runtime 里直接发布会早于通知器订阅
+
+
+def test_version_alerts():
+    from mooapp.ops.versions import VersionNotVerified, version_alerts
+
+    assert version_alerts(Env.SIMULATE, []) == []
+    alerts = version_alerts(Env.SIMULATE, ["OpenD 1012 → 1013"])
+    assert [a.kind for a in alerts] == ["api_version_changed"] and "1013" in alerts[0].message
+    with pytest.raises(VersionNotVerified, match="1013"):
+        version_alerts(Env.REAL, ["OpenD 1012 → 1013"])

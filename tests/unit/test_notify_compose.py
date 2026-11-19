@@ -110,6 +110,17 @@ def test_critical_alerts_immediate():
         assert len(out) == 1 and out[0].kind == "alert" and kind in out[0].subject
 
 
+def test_merge_alert_kinds_classified():
+    """合并 api-guard、M8 后的新报警（你的决定 3A）：签名批准被拒、版本变化立即发；API 形状漂移进汇总。"""
+    c = comp()
+    for kind in ("approve_rejected", "api_version_changed"):
+        assert kind in CRITICAL_ALERTS
+        assert len(c.on_alert(Alert(kind, "x"), at(0))) == 1
+    for kind in ("api_new_field", "api_field_missing", "api_new_enum"):
+        assert kind not in CRITICAL_ALERTS
+        assert c.on_alert(Alert(kind, "x"), at(0)) == []
+
+
 # ------------------------------------------------------------------ 汇总
 
 
