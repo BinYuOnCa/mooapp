@@ -244,3 +244,14 @@ def test_halt_and_resume_never_expire():
     proc.process_one()
     assert client.wait(c)["halted"] is True
     assert "expires_at" not in sys.store.get_command(c).payload
+
+
+def test_expired_reason_shows_eastern_time():
+    """2026-11-16 全局要求（ADR-0033）：给人看的时间用美东。"""
+    sys, proc, client = setup()
+    proc.heartbeat()
+    c = client.enqueue("place", client.place_payload("US.SPY", "BUY", 1, Decimal("10.00")), actor="cli")
+    sys.clock.advance(11)
+    proc.process_one()
+    r = sys.store.get_command(c).result
+    assert r["rule"] == "expired" and "（美东）" in r["reason"] and "+00:00" not in r["reason"]

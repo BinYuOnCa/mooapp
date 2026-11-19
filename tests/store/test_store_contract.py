@@ -204,6 +204,22 @@ def test_net_fill_qty_by_symbol(store):
     assert store.net_fill_qty_by_symbol() == {"US.SPY": 70, "US.QQQ": 5}
 
 
+def test_outbox_enqueue_due_sent_failed(store):
+    """M5 决定 2：outbox 持久化；到期才取；发出后不再取；失败记次数、错误和下次时间。"""
+    with store.transaction():
+        a = store.enqueue_email("fill", "成交", "正文", ["me@example.com"], T)
+        b = store.enqueue_email("alert", "报警", "正文", ["me@example.com"], T + timedelta(seconds=1))
+    due = store.due_emails(T + timedelta(seconds=1))
+    assert [e.id for e in due] == [a, b]
+    assert due[0].recipients == ["me@example.com"] and due[0].attempts == 0 and due[0].status == "pending"
+    with store.transaction():
+        store.mark_email_failed(a, "SMTP 认证失败", T + timedelta(minutes=1), T)
+        store.mark_email_sent(b, T)
+    assert store.due_emails(T + timedelta(seconds=30)) == []
+    later = store.due_emails(T + timedelta(minutes=1))
+    assert [e.id for e in later] == [a] and later[0].attempts == 1 and later[0].last_error == "SMTP 认证失败"
+
+
 def test_recon_events(store):
     with store.transaction():
         store.append_recon("external_order", {"broker_order_id": "555"}, None, T)

@@ -90,6 +90,23 @@ class AuditRecord:
 
 
 @dataclass(frozen=True)
+class OutboxRecord:
+    """outbox 的一行（M5 决定 2）：待发 / 已发的通知邮件。"""
+
+    id: int
+    created_at: datetime
+    kind: str
+    subject: str
+    body: str
+    recipients: list[str]
+    status: str  # pending / sent
+    attempts: int
+    next_attempt_at: datetime
+    last_error: str | None
+    sent_at: datetime | None
+
+
+@dataclass(frozen=True)
 class CommandRecord:
     """commands 表的一行（SPEC 3.4）。status：pending → running → done / error。"""
 
@@ -160,6 +177,11 @@ class Store(Protocol):
     # kv
     def get_kv(self, key: str) -> str | None: ...
     def set_kv(self, key: str, value: str) -> None: ...
+    # M5：outbox（通知邮件；常驻进程投递、退避重试）
+    def enqueue_email(self, kind: str, subject: str, body: str, recipients: list[str], ts: datetime) -> int: ...
+    def due_emails(self, now: datetime) -> list[OutboxRecord]: ...  # pending 且 next_attempt_at <= now，按 id
+    def mark_email_sent(self, email_id: int, ts: datetime) -> None: ...
+    def mark_email_failed(self, email_id: int, error: str, next_attempt_at: datetime, ts: datetime) -> None: ...
     # journal（ADR-0025）
     def mark_journal_applied(self, entry_id: str) -> None: ...
     def is_journal_applied(self, entry_id: str) -> bool: ...
@@ -202,6 +224,7 @@ class _State:
     rules: dict[str, RuleRecord] = field(default_factory=dict)
     rule_orders: dict[str, tuple[str, str, datetime]] = field(default_factory=dict)
     rule_events: list[RuleEventRecord] = field(default_factory=list)
+    outbox: dict[int, OutboxRecord] = field(default_factory=dict)
 
 
 class MemoryStore:
@@ -305,6 +328,22 @@ class MemoryStore:
 
     def get_kv(self, key: str) -> str | None:
         return self._s.kv.get(key)
+
+    def enqueue_email(self, kind: str, subject: str, body: str, recipients: list[str], ts: datetime) -> int:
+        eid = max(self._s.outbox, default=0) + 1
+        self._s.outbox[eid] = OutboxRecord(eid, ts, kind, subject, body, list(recipients), "pending", 0, ts, None, None)
+        return eid
+
+    def due_emails(self, now: datetime) -> list[OutboxRecord]:
+        return [copy.deepcopy(e) for i, e in sorted(self._s.outbox.items()) if e.status == "pending" and e.next_attempt_at <= now]
+
+    def mark_email_sent(self, email_id: int, ts: datetime) -> None:
+        e = self._s.outbox[email_id]
+        self._s.outbox[email_id] = replace(e, status="sent", attempts=e.attempts + 1, sent_at=ts)
+
+    def mark_email_failed(self, email_id: int, error: str, next_attempt_at: datetime, ts: datetime) -> None:
+        e = self._s.outbox[email_id]
+        self._s.outbox[email_id] = replace(e, attempts=e.attempts + 1, last_error=error, next_attempt_at=next_attempt_at)
 
     def set_kv(self, key: str, value: str) -> None:
         self._s.kv[key] = value

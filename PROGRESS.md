@@ -7,6 +7,47 @@
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
 **下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
 
+
+## M5 计划（已确认 2026-11-16；分支 `dev/milestone_5`，worktree `.claude/worktrees/m5`）
+
+目标：SPEC 8 节 M5 三条验收（SMTP 密码填错时交易照常、改正后补发；一笔单分 5 次成交只收 1 封合并邮件；连续 3 个交易日收到心跳）。与 M7（主目录 `dev/milestone_7`）并行开发。
+
+**验收全部通过（2026-11-19）**：验收 1 ✅（11-18）、验收 2 ✅（11-16）、验收 3 ✅（11-19）。下一步：`/milestone-git finish 5`，再按合并计划依次合并 api-guard、M7、M8
+
+**状态（2026-11-16 晚）**：实现完成，`pytest` 840 passed，`pytest -m pg` 44 passed；通知器与常驻进程的线程测试连跑 3 次通过。新增 `src/mooapp/notify/`（mailer、compose、notifier）、迁移 `0005_m5.sql`（outbox）、`EmailCfg.alert_digest_minutes`；`settings.toml` 心跳改为 15 分钟、汇总 30 分钟；`tests/conftest.py` 的测试配置同步改为 15。待你：在 M5 目录 `uv run mooapp db migrate`（0005）→ 验收 1–3 的草稿复制进 `tests/acceptance/`
+
+### M5 验收登记
+
+- [x] 验收 1（SMTP 密码错 → 交易照常 → 改正后补发）：2026-11-18 盘中通过。step1（密码改错）`1 passed`：被拒单 US.MSFT（不在白名单）照常处理，outbox #4 `risk_rejected` 第 1 次发送失败（SMTPServerDisconnected），排队重试；step2（改回）`1 passed`：「已补发 1 封：#4 risk_rejected」，邮箱收到正文「US.MSFT 不在白名单 / 动作 place，来源 cli，发起 acceptance:m5 / 时间 2026-11-18 09:45:57（美东）」——邮件里的时间是事件发生时刻，不是补发时刻。备注：step1 打印的「下次」重试时间是 UTC，出自验收测试本身的 print（产品代码与邮件均为美东），验收文件由你维护，是否改留给你决定
+- [x] 验收 2（5 次部分成交 → 1 封）：2026-11-16 晚 `1 passed`；邮箱只收到 1 封「[mooapp] [SIMULATE] 成交 US.SPY BUY 5/5」，正文「本次合并 5 次成交，累计 5/5」
+- [x] 验收 3（连续 3 个交易日心跳）：2026-11-19 美东 9:36 由 cron 运行 `test_m5_heartbeat_3days.py`，`1 passed`（11-17、11-18、11-19 三天都是 9:15:00 美东发出）。11-18 15:26 提前运行过一次，因为最近 3 个交易日含 11-16（当天未发心跳）而失败，属预期。原计划：每天 9:00 前在 M5 目录启动 `mooapp run`，9:35 左右 Ctrl-C 让出单实例锁给主目录的 M6 验收；第 3 天（2026-11-19）9:30 后跑 `test_m5_heartbeat_3days.py`
+
+| 交易日 | 心跳收到（时刻） | 备注 |
+|---|---|---|
+| 2026-11-17 | ✅ 9:15（美东），未迟到 | 常驻进程 7:43 启动（第一次因 OpenD `WAIT_RECONNECT` 失败，重启 OpenD 后成功）；8:13 左右另收到「报警汇总 57 条」（启动恢复的未知 / 外部订单）；9:35 由 cron 停止。验收 1 推迟，所以今天算第 1 天 |
+| 2026-11-18 | ✅ 9:15（美东），未迟到 | cron 9:00 启动；OpenD 未运行，前 4 次「拒绝连接」，约 90 秒重试一次，9:05 左右你启动 OpenD，第 5 次 9:06:32 启动成功（重试逻辑实测有效）；9:35 SIGTERM，3 秒正常退出；随后 M6 验收 `1 passed`（take 触发） |
+| 2026-11-19 | ✅ 9:15（美东），未迟到 | cron 9:00 第 1 次就启动成功（OpenD 已在线）；9:35 SIGTERM，2 秒退出；9:36 验收 3 `1 passed`；9:37 M6 验收 `1 passed`（stop 触发，卖单 847435 @738.075） |
+
+另：停止常驻进程时，未到时间的汇总与合并窗口写进 outbox（2026-11-16 修复，5915166），下次启动补发
+
+### 你的决定（2026-11-16）
+
+1. 常驻进程与 `mooapp eod` 读 secrets 的 `[smtp]` 段：ADR-0032（扩展 ADR-0029 的例外）
+2. 发送队列：数据库 **outbox 表**（迁移 `0005_m5.sql`，避开 M7 的 0004），重启后补发；常驻进程统一投递
+3. 每次重试前重新读 `[smtp]`（改正密码不用重启）；重启后从 outbox 补发
+4. 关键事件立即发（成交、RiskRejected、HaltChanged、`daily_loss_halt` / `halt_cancel_failed` / `resume_rejected` 等）；其余报警**每 30 分钟汇总一封**，可配置 15–120 分钟（`alert_digest_minutes`），没有新报警不发；启动恢复期间的报警并入汇总
+5. 心跳：交易日**开盘前 15 分钟（美东 9:15）**，可配置 5–25 分钟（`heartbeat_minutes_before_open`，即 9:05–9:25）；常驻进程晚于该时刻启动则启动后补发一封并标「迟到」；每天一封
+6. 重试间隔 1、2、5、15 分钟，之后每 30 分钟，直到发出
+7. `mooapp eod` 结束后**由 eod 进程直接发**汇总邮件，不等常驻进程；直接发送失败则写进 outbox，由常驻进程重试（不丢）。eod 在 M7 分支，M5 提供「同步发送、失败转 outbox」的接口，两个分支都合并后再接上
+
+### 设计要点
+
+- `src/mooapp/notify/`：`mailer.py`（Mailer 协议；SmtpMailer：465 用 SSL、587 用 STARTTLS，标准库 smtplib，不加依赖；测试用 FakeMailer 可模拟认证失败、网络错误）、`compose.py`（事件 → 邮件：成交按订单在 `merge_partial_fills_seconds` 窗口内合并，订单终态立即发出；报警汇总；账号只显示后 4 位）、`notifier.py`（订阅 EventBus，只排队不阻塞；后台线程从 outbox 投递、退避重试）、`heartbeat.py`（交易日 9:15 心跳、迟到补发、每天一封）
+- `oms/store.py` / `oms/pg_store.py`：outbox（enqueue、取到期待发、标记已发 / 失败与下次重试时间）；内存与 PG 契约测试
+- `config/models.py`：`EmailCfg` 增加 `alert_digest_minutes`（15–120）；`heartbeat_minutes_before_open` 改为 5–25；`settings.toml` 默认 15 和 30
+- `ops/run.py`：常驻进程启动通知器与心跳；停止时把队列里的邮件留在 outbox
+- 测试先写、先失败；验收 1–3 的草稿贴在聊天里，由你复制进 `tests/acceptance/`
+
 ## 修复计划（已确认 2026-11-16，分支 `fix/Post_Milestone_3`）
 
 周一验收中发现的两个问题。你的决定：计划 1 选 A（`min` 公式 + ADR-0031）；计划 2 照做；SPEC 由 Claude 改；**先做计划 2**。每份先提交失败的测试，再提交实现。

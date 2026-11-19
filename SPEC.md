@@ -452,9 +452,12 @@ class EventBus:
     def subscribe(self, kind: type[DomainEvent], cb: Callable[[DomainEvent], None]) -> None: ...
 # DomainEvent：OrderPlaced, OrderCanceled, OrderFilled, RiskRejected, ReconBreak, EodPnl, Heartbeat, Alert
 
-class EmailNotifier:   # 订阅 EventBus；异步队列 + 重试；SMTP 失败不阻塞交易；账号只显示后 4 位
+class Notifier:   # M5（原名 EmailNotifier）：订阅 EventBus 只排队；outbox 表持久化 + 退避重试（1/2/5/15/30 分钟）；SMTP 失败不阻塞交易；账号只显示后 4 位
     def start(self) -> None: ...
-    def stop(self) -> None: ...
+    def stop(self) -> None: ...   # 未发出的留在 outbox，下次启动补发
+def deliver_or_enqueue(email: Email, recipients, mailer: Mailer, store: Store, clock: Clock) -> bool   # mooapp eod 用：当场发，失败转 outbox（M5 决定 7）
+# 成交按订单在 merge_partial_fills_seconds 内合并；关键事件立即发；其余报警每 alert_digest_minutes（15–120）汇总；
+# 心跳：交易日开盘前 heartbeat_minutes_before_open（5–25）分钟，迟到补发；凭据见 ADR-0032
 ```
 
 ### 5.8 eod

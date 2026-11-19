@@ -55,7 +55,10 @@ class EmailCfg(_Strict):
     enabled: bool
     recipients: tuple[str, ...]
     merge_partial_fills_seconds: NonNegInt
-    heartbeat_minutes_before_open: NonNegInt
+    # M5 决定 5：开盘前多少分钟发心跳，5–25（美东 9:05–9:25）
+    heartbeat_minutes_before_open: Annotated[int, Field(ge=5, le=25)]
+    # M5 决定 4：普通报警每多少分钟汇总一封，15–120
+    alert_digest_minutes: Annotated[int, Field(ge=15, le=120)] = 30
 
 
 class AgentCfg(_Strict):
