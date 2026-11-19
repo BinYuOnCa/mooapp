@@ -172,6 +172,7 @@ def order_list(ctx: typer.Context, all_: Annotated[bool, typer.Option("--all", h
 # ------------------------------------------------------------------ M4：命令表与常驻进程（SPEC 3.4）
 
 EXIT_COMMAND = 4
+EXIT_BROKER = 6  # mooapp run 连不上 OpenD（5 留给 M7 的 EXIT_BREAK）
 COMMAND_TIMEOUT = 30.0
 
 
@@ -308,6 +309,7 @@ def run(ctx: typer.Context) -> None:
     import signal
     import threading
 
+    from mooapp.broker.port import BrokerUnavailable
     from mooapp.ops.run import RealDisabled, RunnerAlreadyRunning, build_runtime
 
     env: Env = ctx.obj
@@ -316,6 +318,9 @@ def run(ctx: typer.Context) -> None:
     except (ConfigError, RealDisabled) as e:
         typer.echo(f"无法启动：{e}", err=True)
         raise typer.Exit(EXIT_CONFIG) from None
+    except BrokerUnavailable as e:  # OpenD 未启动或未就绪：一行说明即可，调用栈没有信息量（由外层调度重试）
+        typer.echo(f"无法连接 OpenD：{e}", err=True)
+        raise typer.Exit(EXIT_BROKER) from None
     stopped = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopped.set())
     try:
