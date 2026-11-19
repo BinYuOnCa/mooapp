@@ -63,6 +63,7 @@ class Runtime:
     listen: Callable[[float], bool] | None = None  # 等待新命令通知，最多等 timeout 秒；None 时只靠轮询
     notifier: Any = None  # M5：notify.notifier.Notifier（[notify.email] enabled 时）；启动恢复之前开始订阅
     closers: list[Callable[[], None]] = field(default_factory=list)
+    startup_alerts: list[Alert] = field(default_factory=list)  # build_runtime 产生的报警（ADR-0035 版本变化），通知器订阅后再发
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
     _hb_thread: threading.Thread | None = None
@@ -76,6 +77,8 @@ class Runtime:
         self.pump.start()
         if self.notifier is not None:
             self.notifier.start()  # 先订阅：启动恢复期间的报警也进汇总（M5 决定 4）
+        for a in self.startup_alerts:
+            self.bus.publish(a)
         if self.engine is not None:
             self.engine.start()  # 规则动作线程：闸门调用不在事件线程上（M6b 审查修复 #1）
             self.engine.recover()  # 先恢复规则：OMS 启动恢复产生的 OrderChanged 会补喂停机期间的成交
@@ -189,9 +192,10 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
         # ADR-0035：版本闸门（SIMULATE 报警继续，REAL 拒绝）；数据形状漂移报警
         from mooapp.broker.opend import sdk_version
         from mooapp.config.loader import load_verified_versions
-        from mooapp.ops.versions import version_diffs, version_gate
+        from mooapp.ops.versions import version_alerts, version_diffs
 
-        version_gate(env, version_diffs(broker.server_version(), sdk_version(), load_verified_versions(config_dir / "verified_versions.toml")), bus)
+        # REAL 不一致在这里直接拒绝；SIMULATE 的报警交给 Runtime，通知器订阅后再发（否则进不了邮件）
+        startup_alerts = version_alerts(env, version_diffs(broker.server_version(), sdk_version(), load_verified_versions(config_dir / "verified_versions.toml")))
         broker.on_drift(lambda d: bus.publish(Alert(d.kind, d.message, details={"api": d.api, "name": d.name, "value": d.value})))
         oms = OMS(store=jstore, broker=broker, bus=bus, clock=clock, env=env, journal=journal)  # type: ignore[arg-type]
         pump = EventPump(oms, threaded=True)
@@ -239,7 +243,7 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
         raise
     return Runtime(
         env=env, clock=clock, broker=broker, md=broker, store=store, bus=bus, oms=oms, pump=pump, poller=poller,  # type: ignore[arg-type]
-        executor=executor, gate=gate, processor=processor, engine=engine, listen=listen, closers=closers, notifier=notifier,
+        executor=executor, gate=gate, processor=processor, engine=engine, listen=listen, closers=closers, notifier=notifier, startup_alerts=startup_alerts,
     )  # fmt: skip
 
 

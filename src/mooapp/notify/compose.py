@@ -24,6 +24,7 @@ from mooapp.risk.gate import HaltChanged, RiskRejected
 CRITICAL_ALERTS = frozenset({
     "daily_loss_halt", "halt_cancel_failed", "resume_rejected", "halt_not_persisted", "halt_degraded",
     "lock_failed", "runner_error", "command_orphaned",
+    "approve_rejected", "api_version_changed",  # 合并 api-guard、M8 后（你的决定 3A，2026-11-19）；api_* 形状漂移进汇总
 })  # fmt: skip
 ACCOUNT_KEYS = frozenset({"acc_id", "card_num", "uni_card_num"})
 DIGEST_EXAMPLES = 3

@@ -24,10 +24,16 @@ def version_diffs(opend: str, sdk: str, verified: VerifiedVersions) -> list[str]
     return out
 
 
-def version_gate(env: Env, diffs: list[str], bus: EventBus) -> None:
+def version_alerts(env: Env, diffs: list[str]) -> list[Alert]:
+    """REAL 下不一致直接拒绝；SIMULATE 返回要发的报警，由调用方在通知器订阅之后发布（常驻进程见 Runtime.startup_alerts）。"""
     if not diffs:
-        return
+        return []
     text = "；".join(diffs)
     if env is Env.REAL:
         raise VersionNotVerified(f"版本未经验证：{text}。先重跑契约测试与探针，再更新 config/verified_versions.toml（ADR-0035）")
-    bus.publish(Alert("api_version_changed", f"版本与已验证的不同：{text}；模拟盘继续运行，请重跑契约测试与探针后更新 verified_versions.toml（ADR-0035）"))
+    return [Alert("api_version_changed", f"版本与已验证的不同：{text}；模拟盘继续运行，请重跑契约测试与探针后更新 verified_versions.toml（ADR-0035）")]
+
+
+def version_gate(env: Env, diffs: list[str], bus: EventBus) -> None:
+    for a in version_alerts(env, diffs):
+        bus.publish(a)
