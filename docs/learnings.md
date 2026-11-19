@@ -624,3 +624,9 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
 - **journal 路径相对当前目录**（2026-11-17 无人值守时发现）：`build_runtime` 的 journal 默认是 `var/journal`，在 M5 worktree 里启动的常驻进程把 journal 写到 `.claude/worktrees/m5/var/journal`，主目录启动的写到主目录。数据库不可用时只写进某一边 journal 的记录，另一边启动时不会回放。M5 合并、只用主目录后不再有这个问题；并行期间排查要两边都看
 - **OpenD 启动后行情连接可能停在 `WAIT_RECONNECT`**（2026-11-17 早上）：`mooapp run` 5 秒内连不上就报 BrokerUnavailable 退出；退出 OpenD 重新登录后正常。无人值守前先用 `mooapp doctor` 确认 OpenD 就绪
 
+## API 行为守卫（ADR-0035，2026-11-18）
+
+- **基线来自录制，不靠记忆**：各接口的字段集合直接从 `recordings/probes`、`recordings/pushes` 统计（订单 28、订单推送 29、下单返回 23、持仓 33、资金 68、快照 142、报价推送 62），枚举取值从 `docs/vendor/` 提取（订单状态 11、方向 5、订单类型 15、市场状态 34、交易日类型 3）；订单状态的枚举与 `oms/mapping.py` 的 `VENDOR_STATUSES` 一致，由测试锁定
+- **只看见、不拦截**：形状漂移只报警（每进程每项一次）；版本不一致 SIMULATE 报警继续、REAL 拒绝启动。必需字段缺失或类型不对仍由 `convert.py` 直接报错——这是另一道、更早的防线
+- **不同接口返回的字段并不相同**：同样是订单，`place_order` 的返回少 5 个字段，推送多 `trd_env`、`trd_market`、少 `order_market`；基线必须按接口分开，否则会误报
+

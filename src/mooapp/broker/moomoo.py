@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from mooapp.broker import opend
+from mooapp.broker.drift import Drift, DriftDetector
 from mooapp.broker.convert import (
     FillSynthesizer,
     cash_from_row,
@@ -86,6 +87,7 @@ class MoomooBroker:
         # 闸门每次下单都要持仓和当日盈亏，两者来自同一个 position_list_query：短时缓存，只查一次（M4 审查小问题）
         self._pos_lock = threading.Lock()
         self._pos_cache: tuple[float, list[dict[str, Any]]] | None = None
+        self._drift = DriftDetector()  # ADR-0035：返回数据形状与基线比较，只报警
         self._register_order_handler()
 
     # ------------------------------------------------------------------ 内部
@@ -97,7 +99,18 @@ class MoomooBroker:
         return data
 
     def _rows(self, api: str, result: tuple[int, Any]) -> list[dict[str, Any]]:
-        return self._ok(api, result).to_dict("records")
+        rows = self._ok(api, result).to_dict("records")
+        self._drift.check(api, rows)  # ADR-0035
+        return rows
+
+    def on_drift(self, cb: Callable[[Drift], None]) -> None:
+        """ADR-0035：发现新字段、基线字段消失、新枚举值时回调（每进程每项一次）。"""
+        self._drift.add_report(cb)
+
+    def server_version(self) -> str:
+        """OpenD 版本（vendor § Get global market status：server_ver），供版本闸门比较（ADR-0035）。"""
+        d = self._ok("get_global_state", self._quote.get_global_state())
+        return str(d.get("server_ver", ""))
 
     POSITIONS_CACHE_SECONDS = 0.5
 
@@ -143,6 +156,7 @@ class MoomooBroker:
             if self._recorder is not None:
                 for row in rows:
                     self._recorder.record("order", row)
+            self._drift.check("push.order", rows)  # ADR-0035
             for row in rows:
                 order = order_from_row(row)
                 fill = self._synth.observe(order)
@@ -329,7 +343,9 @@ class MoomooBroker:
                 if self._recorder is not None:
                     self._recorder.record("quote_error", _one_line(data))
                 raise BrokerError(f"报价推送失败：{_one_line(data)}")
-            for row in data.to_dict("records"):
+            qrows = data.to_dict("records")
+            self._drift.check("push.quote", qrows)  # ADR-0035
+            for row in qrows:
                 if self._recorder is not None:
                     self._recorder.record("quote", row)
                 q = quote_from_push_row(row)
@@ -348,6 +364,7 @@ class MoomooBroker:
             "request_trading_days",
             self._quote.request_trading_days(market=self._ft.TradeDateMarket.US, start=day, end=day),
         )
+        self._drift.check("request_trading_days", days)  # ADR-0035
         return len(days) > 0
 
 

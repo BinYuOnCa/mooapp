@@ -12,7 +12,7 @@
 
 目标：SPEC 8 节 M5 三条验收（SMTP 密码填错时交易照常、改正后补发；一笔单分 5 次成交只收 1 封合并邮件；连续 3 个交易日收到心跳）。与 M7（主目录 `dev/milestone_7`）并行开发。
 
-**验收全部通过（2026-11-19）**：验收 1 ✅（11-18）、验收 2 ✅（11-16）、验收 3 ✅（11-19）。下一步：`/milestone-git finish 5`，再按合并计划依次合并 api-guard、M7、M8
+**验收全部通过（2026-11-19）**：验收 1 ✅（11-18）、验收 2 ✅（11-16）、验收 3 ✅（11-19）。2026-11-19 合并进 main（2a29472），tag `accept/milestone_5`；合并后 main 上 `pytest` 845 passed、`pytest -m pg` 44 passed
 
 **状态（2026-11-16 晚）**：实现完成，`pytest` 840 passed，`pytest -m pg` 44 passed；通知器与常驻进程的线程测试连跑 3 次通过。新增 `src/mooapp/notify/`（mailer、compose、notifier）、迁移 `0005_m5.sql`（outbox）、`EmailCfg.alert_digest_minutes`；`settings.toml` 心跳改为 15 分钟、汇总 30 分钟；`tests/conftest.py` 的测试配置同步改为 15。待你：在 M5 目录 `uv run mooapp db migrate`（0005）→ 验收 1–3 的草稿复制进 `tests/acceptance/`
 
@@ -47,6 +47,28 @@
 - `config/models.py`：`EmailCfg` 增加 `alert_digest_minutes`（15–120）；`heartbeat_minutes_before_open` 改为 5–25；`settings.toml` 默认 15 和 30
 - `ops/run.py`：常驻进程启动通知器与心跳；停止时把队列里的邮件留在 outbox
 - 测试先写、先失败；验收 1–3 的草稿贴在聊天里，由你复制进 `tests/acceptance/`
+
+## API 行为守卫（已确认 2026-11-18；分支 `fix/api-guard`，worktree `.claude/worktrees/api-guard`）
+
+**合并（2026-11-19）**：在 M5 之后合并进 main（PROGRESS、learnings 两处追加型冲突，两边都保留）。合并后另做两项（合并预查发现、你选 3A）：版本闸门移到通知器订阅之后，否则启动时的 `api_version_changed` 进不了邮件；`approve_rejected`、`api_version_changed` 加进立即发送清单，`api_*` 漂移报警进汇总
+
+**状态（2026-11-18 凌晨）**：实现完成，`pytest` 814 passed，`pytest -m pg` 43 passed。待你：`uv run mooapp doctor` 看「版本已验证」一项；合并顺序见合并计划（与 M5、M7、M8 都会碰 `ops/run.py`、`ops/cli.py`、`broker/*`）
+
+目的：Moomoo API / OpenD 的行为可能随版本变化；把「环境变了」「数据形状变了」变成看得见的报警，REAL 不在未验证的版本上运行。决定见 ADR-0035（都按建议）。
+
+- **A 版本闸门**：`config/verified_versions.toml`（OpenD 1012、SDK 10.12.7208，依据：契约测试与 P9–P13）；`mooapp doctor` 不一致 WARN；`mooapp run` 启动比较：SIMULATE 报警 `api_version_changed` 继续，REAL 拒绝启动
+- **C 新字段 / 新枚举报警**：`broker/drift.py` 用探针录制的字段集合（按接口）与 vendor 文档的枚举取值做基线；`MoomooBroker` 在每次解析返回数据、每条推送时比较，报 `api_new_field` / `api_field_missing` / `api_new_enum`（每进程每项一次，只报警）；常驻进程接到事件总线（M5 合并后进汇总邮件）
+- 文件：ADR-0035、`config/verified_versions.toml`、`config/models.py`、`config/loader.py`、`broker/drift.py`、`broker/moomoo.py`、`broker/throttle.py`、`broker/fake.py`、`broker/port.py`、`ops/doctor.py`、`ops/run.py`；测试先写、先失败
+
+## M9 计划的输入（2026-11-18 记录）
+
+- **B 每天开盘前的金丝雀检查**：开盘前自动跑一组只读契约（账户、持仓、当日 / 历史订单、交易日历、快照的字段、类型、枚举）；可选开盘后一张远离市价的单即撤，检查推送顺序。不通过就发邮件并当天自动 halt（只许撤单）
+- **D 定期重跑探针，自动对比基线**：把 P9、P10d、P12、P13 等关键结论写成可比较的期望值，每月或版本变化时重跑并自动比较
+- 本周的 crontab + `var/unattended/daily.sh`（启动 / 停止常驻进程、M6 验收、M7 对账、OpenD 未就绪时重试）是 M9 的雏形
+
+## M9 之后的可选升级（2026-11-18 记录，M9 完成后再决定）
+
+- **E vendor 文档变化提醒**：定期重新抓取 Moomoo OpenAPI 文档，与 `docs/vendor/` 的快照逐节比较，有改动就提醒（邮件），并列出改动涉及的接口与我们依赖它的代码、learnings 条目。前提：需要访问外网（Moomoo 文档站点），要你批准新域名；抓取频率与范围另行决定
 
 ## 修复计划（已确认 2026-11-16，分支 `fix/Post_Milestone_3`）
 
