@@ -1,6 +1,6 @@
 # PROGRESS
 
-**当前（2026-11-20，分支 `dev/milestone_7`）**：M1–M6 已验收（tag `accept/milestone_1` 至 `accept/milestone_6`）；M5、`fix/api-guard`、`fix/runner-quiet` 已合并进 main。M7 验收 3 已通过 4 天（见「M7 验收 3 登记」），第 5 天是 2026-11-23（周一，cron 照常跑）。之后的顺序：你运行 `/milestone-git finish 7` → 合并 M8 进 main（追加型冲突，合并后 `uv sync`、`pytest`、`pytest -m pg`）→ 在 main 上跑 M8 验收 1 → `finish 8` → 开 fix 分支做 C2（ADR-0036）→ 从 main 拉 `dev/milestone_9`。合并步骤、C2 结论、M9 计划和已定决策见 `var/plans/2026-11-19-m9-merge-c.md`（在 `var/`，不进 Git；合并时写进 PROGRESS）
+**当前（2026-11-20，分支 `dev/milestone_7`）**：M1–M6 已验收（tag `accept/milestone_1` 至 `accept/milestone_6`）；M5、`fix/api-guard`、`fix/runner-quiet` 已合并进 main。**M7 验收全部通过（2026-11-23）**，验收 3 连续 5 个交易日零差异（见「M7 验收 3 登记」）。之后的顺序：你运行 `/milestone-git finish 7` → 合并 M8 进 main（追加型冲突，合并后 `uv sync`、`pytest`、`pytest -m pg`）→ 在 main 上跑 M8 验收 1 → `finish 8` → 开 fix 分支做 C2（ADR-0036）→ 从 main 拉 `dev/milestone_9`。合并步骤、C2 结论、M9 计划和已定决策见 `var/plans/2026-11-19-m9-merge-c.md`（在 `var/`，不进 Git；合并时写进 PROGRESS）
 
 **M6b（已完成，tag `accept/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
 **M4 审查修复已合并进本分支**（2026-11-14，fb1580e、4edf086）：解决了 7 个文件的冲突（规则引擎和 resume 签名共用 `CommandProcessor`；`poll_stale_quotes` 留在命令线程，心跳改为独立线程）。`pytest` 755 passed，`pytest -m pg` 43 passed；常驻进程和规则引擎的线程测试连跑 5 次都通过
@@ -23,7 +23,9 @@
 | 2 | 2026-11-18 | ✅ M6 验收 9:37（美东，cron）：take 触发，卖单 846215 @731.86 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 −0.47，未实现 0.00 | 无人值守；另有你盘中手动做的 M5 验收 1（US.MSFT 被白名单拒绝，未下单，不影响对账） |
 | 3 | 2026-11-19 | ✅ M6 验收 9:37（美东，cron）：买 738.29，stop 触发，卖单 847435 @738.075 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 −0.22（738.075 − 738.29 = −0.215，与 journal 一致），未实现 0.00 | 无人值守；M5 验收 3 同日 9:36 通过 |
 | 4 | 2026-11-20 | ✅ M6 验收 9:37（美东，cron）：stop 触发，卖单 849349 @713.59 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 −0.35，未实现 0.00 | 无人值守；9:00 常驻进程一次启动成功 |
-| 5 | 2026-11-23 | | | |
+| 5 | 2026-11-23 | ✅ M6 验收 9:37（美东，cron）：take 触发，卖单 851483 @717.77 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 +0.09，未实现 0.00 | 无人值守；9:00 常驻进程一次启动成功 |
+
+**M7 验收 3 通过**（2026-11-23）：2026-11-17、18、19、20、23 连续 5 个交易日，每天有成交、对账零差异。M7 三条验收全部通过（验收 1 由 `test_eod_pnl.py` 覆盖，验收 2 见上）
 
 目标：SPEC 8 节 M7 三条验收（构造数据算到分；插假成交出 [BREAK]；模拟盘连续 5 个交易日对账零差异）。
 
@@ -589,7 +591,7 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 
 ### 未完成
 
-- [ ] M7 验收 3 第 5 天（2026-11-23，cron）→ `/milestone-git finish 7`（你本人运行）
+- [ ] `/milestone-git finish 7`（你本人运行；M7 验收 2026-11-23 全部通过）
 - [ ] M8 合并进 main 后：在 main 上跑 M8 验收 1（查持仓 → 提议 → 批准 → 成交邮件）→ `/milestone-git finish 8`
 - [ ] 合并完成后：crontab 改为在 main 目录启动常驻进程（你本人改）；M5、api-guard、M8 的 worktree 何时删除由你决定（分支保留）
 - [ ] 可选：美东 16:00 后再跑一次 P11 `! uv run python scripts/probe_m6_quote.py`，看盘后的 `last_price`、`open_price`
