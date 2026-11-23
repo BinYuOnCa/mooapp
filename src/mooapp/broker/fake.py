@@ -28,7 +28,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -101,6 +101,7 @@ class FakeBroker:
         self._quotes: dict[str, Quote] = {}
         self._market_states: dict[str, str] = {}
         self._holidays: set[date] = set()
+        self._half_days: set[date] = set()  # M7 / P8：半日市（MORNING，13:00 收盘）
         self._unlocked = False
         self._synth = FillSynthesizer()
         self._order_cbs: list[Callable[[BrokerOrder], None]] = []
@@ -150,10 +151,20 @@ class FakeBroker:
             return list(self._calls.get(name, []))
 
     def set_quote(
-        self, symbol: str, last: Decimal, ask: Decimal | None = None, bid: Decimal | None = None, open: Decimal | None = None
+        self,
+        symbol: str,
+        last: Decimal,
+        ask: Decimal | None = None,
+        bid: Decimal | None = None,
+        open: Decimal | None = None,
+        prev_close: Decimal | None = None,
+        ts: datetime | None = None,
     ) -> None:
+        """ts 默认为当前时间；M7 测试用 ts 模拟收盘后快照的 update_time 停在收盘时刻（P13）。"""
         with self._lock:
-            self._quotes[symbol] = Quote(symbol=symbol, last=last, open=open, ts=self._clock.now(), bid=bid, ask=ask)
+            self._quotes[symbol] = Quote(
+                symbol=symbol, last=last, open=open, ts=ts or self._clock.now(), bid=bid, ask=ask, prev_close=prev_close
+            )
 
     def set_market_state(self, symbol: str, state: str) -> None:
         with self._lock:
@@ -162,6 +173,10 @@ class FakeBroker:
     def set_holiday(self, d: date) -> None:
         with self._lock:
             self._holidays.add(d)
+
+    def set_half_day(self, d: date) -> None:
+        with self._lock:
+            self._half_days.add(d)
 
     def set_position(self, symbol: str, qty: int, avg_cost: Decimal) -> None:
         with self._lock:
@@ -341,9 +356,9 @@ class FakeBroker:
                 raise NotSupported("模拟盘不支持 order_fee_query（P7）")
             return {oid: Decimal(0) for oid in broker_order_ids}
 
-    def query_positions(self) -> list[Position]:
+    def query_positions(self, refresh: bool = False) -> list[Position]:
         with self._lock:
-            self._record("query_positions")
+            self._record("query_positions", refresh)
             held: dict[str, int] = {}
             for o in self._orders.values():  # P10d：券商的可卖数量已扣除已确认的未成交卖单
                 if o.side is Side.SELL and not o.is_terminal and o.raw_status != "SUBMITTING":
@@ -444,3 +459,14 @@ class FakeBroker:
     def is_trading_day(self, d: date) -> bool:
         with self._lock:
             return d.weekday() < 5 and d not in self._holidays
+
+    def close_times(self, start: date, end: date) -> dict[date, time]:
+        """M7：周末和 set_holiday 之外的日子；set_half_day 的日子 13:00 收盘，其余 16:00（美东）。"""
+        out: dict[date, time] = {}
+        with self._lock:
+            d = start
+            while d <= end:
+                if d.weekday() < 5 and d not in self._holidays:
+                    out[d] = time(13, 0) if d in self._half_days else time(16, 0)
+                d += timedelta(days=1)
+        return out

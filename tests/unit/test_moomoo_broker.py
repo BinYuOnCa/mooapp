@@ -180,6 +180,8 @@ class QuoteCtx:
         self.calls.append(("request_trading_days", (), kw))
         if kw["start"] == "2026-11-14":
             return 0, []
+        if kw["start"] != kw["end"]:  # M7：区间查询（P8 实测：半日市标 MORNING，休市日不在列表里）
+            return 0, [{"time": "2026-11-25", "trade_date_type": "WHOLE"}, {"time": "2026-11-27", "trade_date_type": "MORNING"}]
         return 0, [{"time": kw["start"], "trade_date_type": "WHOLE"}]
 
     def close(self):
@@ -438,6 +440,38 @@ def test_snapshot_and_market_state(broker):
     qs = broker.snapshot(["US.TD"])
     assert qs[0].last == Decimal("124.06")
     assert broker.market_state("US.SPY") == "AFTERNOON"
+
+
+def test_snapshot_parses_prev_close(broker, ctxs):
+    """M7：补跑上一个交易日时用快照 prev_close_price（P13：最终值）。"""
+    _, quote = ctxs
+    quote.get_market_snapshot = lambda codes: (
+        0,
+        DF([{"code": "US.SPY", "update_time": "2026-11-16 16:00:00", "last_price": 739.96, "open_price": 749.66, "prev_close_price": 754.37}]),
+    )
+    q = broker.snapshot(["US.SPY"])[0]
+    assert q.prev_close == Decimal("754.37")
+    assert q.ts == datetime(2026, 11, 16, 21, 0, tzinfo=UTC)
+
+
+def test_close_times_from_calendar(broker, ctxs):
+    """M7 / P8：WHOLE 16:00、MORNING 13:00（美东），非交易日不在结果里；一次区间查询。"""
+    from datetime import time as dtime
+
+    _, quote = ctxs
+    got = broker.close_times(date(2026, 11, 25), date(2026, 11, 28))
+    assert got == {date(2026, 11, 25): dtime(16, 0), date(2026, 11, 27): dtime(13, 0)}
+    _, _, kw = quote.calls[-1]
+    assert kw == {"market": "US", "start": "2026-11-25", "end": "2026-11-28"}
+
+
+def test_query_positions_refresh_bypasses_cache(broker, ctxs):
+    """M7 / P12：refresh=True 传 refresh_cache=True，且不用本地 0.5 秒缓存。"""
+    trade, _ = ctxs
+    broker.query_positions()
+    broker.query_positions(refresh=True)
+    kws = [kw for name, kw in trade.calls if name == "position_list_query"]
+    assert [kw["refresh_cache"] for kw in kws] == [False, True]
 
 
 def test_is_trading_day(broker, ctxs):

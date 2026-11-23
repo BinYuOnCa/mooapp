@@ -269,7 +269,7 @@ class BrokerFill:
 
 @dataclass(frozen=True) class Position: symbol: str; qty: int; can_sell_qty: int; avg_cost: Decimal
 @dataclass(frozen=True) class Cash:     currency: str; cash: Decimal; buying_power: Decimal
-@dataclass(frozen=True) class Quote:    symbol: str; last: Decimal; open: Decimal | None; ts: datetime
+@dataclass(frozen=True) class Quote:    symbol: str; last: Decimal; open: Decimal | None; ts: datetime; prev_close: Decimal | None   # prev_close 来自快照 prev_close_price（M7，P13）
 
 class BrokerPort(Protocol):
     env: Env
@@ -281,7 +281,7 @@ class BrokerPort(Protocol):
     def query_order_history(self, start: datetime, end: datetime) -> list[BrokerOrder]: ...   # history_order_list_query（vendor § Get Historical Orders，30 秒 10 次）；前一天的订单 query_orders 查不到，启动恢复用它结束旧单（2026-11-16 修复计划 2）
     def query_deals(self) -> list[BrokerFill]: ...              # 当日；模拟盘的成交主要靠它和订单推送的 dealt_qty 增量（Q2）
     def query_fees(self, broker_order_ids: list[str]) -> dict[str, Decimal]: ...   # order_fee_query（vendor § Get Order Fee，OpenD ≥ 8.2.4218）；模拟盘是否有值见 P7
-    def query_positions(self) -> list[Position]: ...
+    def query_positions(self, refresh: bool = False) -> list[Position]: ...   # refresh=True 绕过 OpenD 缓存（30 秒 10 次）；P12：缓存不随下单、撤单自动更新（M7 对账用刷新）
     def query_cash(self) -> Cash: ...
     # 推送
     def on_order_update(self, cb: Callable[[BrokerOrder], None]) -> None: ...
@@ -296,6 +296,7 @@ class MarketDataPort(Protocol):
     def subscribe_quotes(self, symbols: list[str], cb: Callable[[Quote], None]) -> None: ...
     def market_state(self) -> str: ...
     def is_trading_day(self, d: date) -> bool: ...
+    def close_times(self, start: date, end: date) -> dict[date, time]: ...   # 交易日历（vendor § Get Trading Calendar）：WHOLE 16:00、半日市 MORNING 13:00（P8，M7）
 
 # 异常（SDK 的 ret != RET_OK 全部映射，不得吞掉）
 class BrokerError(MooappError): ...
@@ -468,7 +469,8 @@ class EodReport:
     trade_date: date
     rows: list[PnlRow]          # 逐标的：已实现、未实现、费用；券商盈亏与差异
     breaks: list[ReconBreak]    # 有差异时邮件标题加 [BREAK]
-def run_eod(trade_date: date, oms: OMS, broker: BrokerPort, md: MarketDataPort, clock: Clock) -> EodReport
+def run_eod(trade_date: date | None, store: Store, broker: BrokerPort, md: MarketDataPort, clock: Clock, env: Env) -> EodReport   # M7：命令行进程只读运行，不构造 OMS（PROGRESS「M7 计划」决定 1）
+def save_report(store: Store, report: EodReport) -> None   # eod_reports，只追加（决定 4）
 def write_csv(report: EodReport, out_dir: Path) -> Path   # reports/YYYY-MM-DD.csv
 ```
 

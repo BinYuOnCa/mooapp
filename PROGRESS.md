@@ -1,11 +1,62 @@
 # PROGRESS
 
-**当前（M6b，分支 `dev/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
+**当前（2026-11-20，分支 `dev/milestone_7`）**：M1–M6 已验收（tag `accept/milestone_1` 至 `accept/milestone_6`）；M5、`fix/api-guard`、`fix/runner-quiet` 已合并进 main。**M7 验收全部通过（2026-11-23）**，验收 3 连续 5 个交易日零差异（见「M7 验收 3 登记」）。之后的顺序：你运行 `/milestone-git finish 7` → 合并 M8 进 main（追加型冲突，合并后 `uv sync`、`pytest`、`pytest -m pg`）→ 在 main 上跑 M8 验收 1 → `finish 8` → 开 fix 分支做 C2（ADR-0036）→ 从 main 拉 `dev/milestone_9`。合并步骤、C2 结论、M9 计划和已定决策见 `var/plans/2026-11-19-m9-merge-c.md`（在 `var/`，不进 Git；合并时写进 PROGRESS）
+
+**M6b（已完成，tag `accept/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
 **M4 审查修复已合并进本分支**（2026-11-14，fb1580e、4edf086）：解决了 7 个文件的冲突（规则引擎和 resume 签名共用 `CommandProcessor`；`poll_stale_quotes` 留在命令线程，心跳改为独立线程）。`pytest` 755 passed，`pytest -m pg` 43 passed；常驻进程和规则引擎的线程测试连跑 5 次都通过
 **ADR-0030**（2026-11-14，你选 C）：`rule_add`、`rule_cancel` 也随命令行超时过期；halt、resume 不过期。`pytest` 759 passed，`pytest -m pg` 43 passed。命令行拿到 expired 结果时提示「命令已过期，未执行」（下单、撤单、规则命令都是），`pytest` 763 passed
 **M6a**：2026-11-14 实现完成并提交（279598f、d69b278），`pytest` 667 passed，`pytest -m pg` 35 passed。验收 1（5 条价格路径）和验收 2（非法表达式在加载时被拒）由 `test_rule_machine.py`、`test_dryrun.py`、`test_rule_spec.py` 覆盖；可以手动试 `uv run mooapp rule dry-run examples/rules/spy-oco.yaml --prices examples/prices/path1_stop_first.csv`。下一步 `/milestone-git commit 6`；M6b 另行计划
 **M4（分支 `dev/milestone_4`）**：第 3 步完成（2026-11-14）：闸门完整规则、halt 与 resume、ADR-0026 待撤、按账户共用限流器、commands 表与 `mooapp run`、人锁代码（实盘仍关闭）。`pytest` 550 passed，`pytest -m pg` 35 passed（Claude 在 sandbox 内运行）。M3 实现已完成，等周一常规时段验收
-**下一步**：周一（2026-11-16）按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
+**2026-11-16（周一）**：按下面「周一操作清单」逐步执行。**进度（美东约 10:30）**：第 0 步、0.1–0.5、第 1 步完成；M3 两份验收通过（App 已核对）；0.6 契约测试通过；P10 完成（today_pl_val 有效；can_sell_qty 已扣挂单）；P11 常规时段完成（约每秒 6 条推送，美东时间，open_price 为当天开盘价；16:00 后再跑一次对照）；M4 验收通过（第二次；验收价格系数 0.9 → 0.96）；第 5 步完成；**M6 验收通过**（take 触发）。**今天的验收全部完成**：M3（验收 3、4）、M4（验收 3）、M6（验收 3）；待办见「验收后待办」P9 已有结论（见下方「P9 结论」）
+
+## M7 计划（已确认 2026-11-16；数据来源按 P13 / P11 / P8 实测定稿；分支 `dev/milestone_7`）
+
+**状态（2026-11-16 晚）**：实现完成，`pytest` 841 passed，`pytest -m pg` 45 passed。新增：`src/mooapp/eod/`（pnl、recon、report、run）、`mooapp eod [--date]`（退出码 0 / EXIT_BREAK=5 / EXIT_CONFIG=2）、迁移 0004（eod_reports，只追加）、`query_positions(refresh)`、`Quote.prev_close`、`close_times`、持仓刷新限流。与计划的小差异：`close_time(d)` 实现为区间版 `close_times(start, end)`（一次日历查询）；`run_eod` 签名改为接收 Store 与 env（不构造 OMS），SPEC 已同步。已完成：`mooapp db migrate`（0004）。**第一轮实测（2026-11-16 收盘后，不计入验收）**：`mooapp eod` 无差异；已实现 0.59、买 8 卖 8、持仓 0；用 journal 里的 10 笔成交独立计算，结果一致（+0.12 +0.20 +0.40 −0.04 −0.09）；51 张契约测试直接下的 moo: 订单只报告。待你：验收 2、3 的草稿复制进 `tests/acceptance/`
+
+**M7 验收 2 通过**（2026-11-16 收盘后）：`test_m7_fake_fill_break.py` `1 passed`；假成交（随机选中 M6 止损卖单 843612，插入 1 笔假卖出）→ `[BREAK] fill_qty_mismatch`（本地 2 / 券商 1）+ `local_anomaly`（卖超）；回滚后 `mooapp eod` 仍为无差异。实跑发现：本程序净持仓为负时，差额被误报为「程序外持仓」→ 已修复（先写失败测试 `test_fake_local_sell_fill_is_position_break_not_external`，现报 `position_mismatch`）
+
+### M7 验收 3 登记（连续 5 个交易日，每天有成交、零差异；中断从头数）
+
+| # | 交易日 | 盘中成交 | `test_m7_daily_clean.py` | 备注 |
+|---|---|---|---|---|
+| 1 | 2026-11-17 | ✅ M6 验收 9:37（美东，cron）：买 738.04、止损卖 737.75 | ✅ 16:35（cron）无差异；已实现 −0.29；journal 交叉核对一致 | 无人值守（crontab + M5 目录的 mooapp run 发心跳） |
+| 2 | 2026-11-18 | ✅ M6 验收 9:37（美东，cron）：take 触发，卖单 846215 @731.86 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 −0.47，未实现 0.00 | 无人值守；另有你盘中手动做的 M5 验收 1（US.MSFT 被白名单拒绝，未下单，不影响对账） |
+| 3 | 2026-11-19 | ✅ M6 验收 9:37（美东，cron）：买 738.29，stop 触发，卖单 847435 @738.075 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 −0.22（738.075 − 738.29 = −0.215，与 journal 一致），未实现 0.00 | 无人值守；M5 验收 3 同日 9:36 通过 |
+| 4 | 2026-11-20 | ✅ M6 验收 9:37（美东，cron）：stop 触发，卖单 849349 @713.59 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 −0.35，未实现 0.00 | 无人值守；9:00 常驻进程一次启动成功 |
+| 5 | 2026-11-23 | ✅ M6 验收 9:37（美东，cron）：take 触发，卖单 851483 @717.77 | ✅ 16:35（cron）无差异；SPY 买 1 卖 1，已实现 +0.09，未实现 0.00 | 无人值守；9:00 常驻进程一次启动成功 |
+
+**M7 验收 3 通过**（2026-11-23）：2026-11-17、18、19、20、23 连续 5 个交易日，每天有成交、对账零差异。M7 三条验收全部通过（验收 1 由 `test_eod_pnl.py` 覆盖，验收 2 见上）
+
+目标：SPEC 8 节 M7 三条验收（构造数据算到分；插假成交出 [BREAK]；模拟盘连续 5 个交易日对账零差异）。
+
+### 你的决定（2026-11-16）
+
+1. `mooapp eod [--date]` 是只读命令：命令行进程直接读库、查券商，不经常驻进程和闸门
+2. M7 只提供手动命令，收盘后 30 分钟由你运行；自动调度留到 M9
+3. 汇总邮件等 M5 做完再接；M7 先写 CSV 并在终端打印
+4. 结果**同时**写 CSV（`reports/YYYY-MM-DD.csv`）和数据库表 `eod_reports`（新迁移 0004，以后 Agent 可查）
+5. 验收 3（保留 5 天，你 2026-11-16 选 A）：连续 5 个交易日，每天盘中有成交（跑 M6 验收或 1 股买卖），收盘后跑 `mooapp eod` 零差异；有一天不为零或漏跑就从头数；休市日不算。**2026-11-16 不算**（代码未写，补跑时无法取当天收盘持仓），但 M7 完成后先补跑这一天作为第一轮实测
+6. 内部全程 Decimal 不舍入，只在报告输出时 ROUND_HALF_UP 到 0.01；手算按同一口径
+
+### 已定约束
+
+- ADR-0010 平均成本法、未实现用当日常规时段收盘价；ADR-0019 只核算本程序订单，程序外的只报告
+- 模拟盘无成交记录（P4）、无订单费用（P7）：成交来自订单快照 dealt_qty / 均价，费用记 0 并注明；实盘用 order_fee_query
+
+### 设计要点（数据来源依据：learnings「M7 探针 P13」「P12」「P8」）
+
+- **运行时点**：不早于当天收盘后 30 分钟（WHOLE 日 16:30，半日市 MORNING 日 13:30；P8）。更早运行直接报错退出（收盘价在收盘后几分钟内会被修订，P13）。`--date` 默认今天（美东）；只支持今天（收盘后）和上一个交易日，更早的日期报错
+- **三方对账**（只核算本程序订单，ADR-0019）：
+  - ① 本地：OMS 库里该交易日的 fills、按标的的净持仓
+  - ② 券商订单：今天用 `query_orders(open_only=False, refresh=True)`（P13：收盘后 30 分钟仍完整，84 张三处一致）；上一个交易日用 `query_order_history`
+  - ③ 券商持仓：刷新查询一次（P12：缓存可能过时；P13：一次刷新查询无压力）
+- **[BREAK]**：本地成交与券商订单 dealt_qty / 均价不一致；券商有成交本地没有；本程序净持仓与「券商持仓 − 程序外部分」不一致（程序外部分 = 券商持仓 − 本程序净持仓的差异来源由报告列出，不自动归因）
+- **P&L**（逐标的，Decimal，输出时 ROUND_HALF_UP 到 0.01）：已实现按平均成本；未实现 =（收盘价 − 平均成本）× 持仓。收盘价：今天用收盘后快照 `last_price`（要求 `update_time` 为当天收盘时刻），上一个交易日用今天快照的 `prev_close_price`（最终值）；报告记下收盘价来源和取值时刻。券商 `today_pl_val` 只作参考列
+- **BrokerPort / MarketDataPort 补充**：`query_positions(refresh=False)` 加 refresh 参数（vendor § Get Positions › refresh_cache）；`Quote` 加 `prev_close`（快照 `prev_close_price`）；`MarketDataPort.close_time(d)` 按交易日历返回当天收盘时刻（WHOLE 16:00 / MORNING 13:00 / 非交易日 None；vendor § Get Trading Calendar）。FakeBroker 同步
+- **存储**：`db/migrations/0004_m7.sql` 新表 `eod_reports`（交易日、生成时刻、环境、汇总、breaks、逐标的行 JSONB；同一交易日可多次运行，只追加）；Store 加 `append_eod_report` / `eod_reports(trade_date)`（内存 + PG）
+- **文件**：`src/mooapp/eod/`（`pnl.py` 纯计算、`recon.py` 三方对账、`report.py` EodReport / CSV / 打印、`run.py` 组装 `run_eod`）、`ops/cli.py`（`mooapp eod [--date]`，退出码：0 无差异、非 0 有 BREAK）、`broker/port.py`、`broker/moomoo.py`、`broker/convert.py`、`broker/fake.py`、`broker/throttle.py`（转发新参数）、`oms/store.py`、`oms/pg_store.py`、`db/migrations/0004_m7.sql`、SPEC（接口列表）
+- **测试（先写、先失败）**：`test_eod_pnl.py`（构造数据手算到分：多笔买、部分卖、卖光、加仓后再卖、价格整除不尽，验收 1）；`test_eod_recon.py`（FakeBroker：一致、本地多一笔假成交 → BREAK、券商多成交、均价差、持仓差、程序外持仓不算 BREAK）；`test_eod_cli.py`（收盘前拒绝、日期范围、退出码）；store 契约 `eod_reports`（内存 + PG）；适配器传参（refresh、prev_close、交易日历）；验收 2、3 的草稿贴在聊天里，由你复制进 `tests/acceptance/`
+- **实测**：M7 完成后先补跑 `mooapp eod --date 2026-11-16`（第一轮实测，不计入验收）；之后每个交易日：盘中跑 M6 验收，收盘 30 分钟后 `mooapp eod`
 
 
 ## M5 计划（已确认 2026-11-16；分支 `dev/milestone_5`，worktree `.claude/worktrees/m5`）
@@ -273,7 +324,7 @@ cd ~/GitRepos/mooapp && uv run mooapp resume
 - [x] 打 tag：`accept/milestone_3`（d238e28）、`accept/milestone_4`（d5c1f57）、`accept/milestone_6`（a9cf104），已推送
 - [x] 修复计划 1：闸门可卖数量重复扣挂单（P10d）→ ADR-0031，已实现（见「修复计划」）
 - [x] 修复计划 2：启动恢复改查历史订单（P9）→ 已实现并在模拟盘验证（见「修复计划」）
-- [ ] 可选：美东 16:00 后再跑一次 P11 `uv run python scripts/probe_m6_quote.py`，看盘后 `last_price`、`open_price`
+- 可选：美东 16:00 后再跑一次 P11（2026-11-20 移到「待你处理 › 未完成」）
 - [x] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `build_runtime`（你本人修改）（2026-11-16 完成：分支 `fix/Post_Milestone_3` 提交 ae47027；价格系数 0.9 → 0.96，`build()` 等单实例锁释放；两条模拟盘重跑均 `1 passed`，App 核对 13:16:56 @712.48、13:18:35 @712.22 两张均已撤销）
 
 ### 结果发给 Claude
@@ -601,38 +652,28 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 
 ## 待你处理
 
-- [ ] M6b（开盘后，在 M4 的事项之后，间隔 31 秒）：`! uv run mooapp db migrate`（执行 0003：rules、rule_orders、rule_events）
-- [ ] M6b（常规时段）：`! uv run python scripts/probe_m6_quote.py`（P11：报价推送频率、时区、open_price、盘前盘后的 last_price）；盘前或盘后再跑一次作对照
-- [ ] M6b（常规时段，不处于 halt）：`! uv run pytest -m sim tests/acceptance/test_m6_rule_oco.py`（最长约 10 分钟）
+### 未完成
 
-- [ ] M4（周一）：`! uv run mooapp db migrate`（执行迁移 0002：audit、commands、orders.cancel_pending）
-- [ ] M4（周一常规时段）：`! uv run python scripts/probe_m4_pnl.py`（P10：模拟盘 today_pl_val 是否有效）。无效时闸门会拒绝所有买单，先看 P10 的结果再跑 M4 验收
-- [ ] M4（周一之前）：在 secrets 里加 `[resume] key`（`python3 -c "import secrets; print(secrets.token_hex(32))"` 生成，文件权限保持 600），然后重启 `mooapp run`。没有这把密钥，常驻进程会拒绝所有 resume（ADR-0029）
-- [ ] M4（周一常规时段）：`! uv run pytest -m sim tests/acceptance/test_m4_halt.py`，结束后 `! uv run mooapp resume`（halt 跨重启保留）
-- [x] M3 打 tag 之后：两份 M3 验收的 `build()` 改用 `mooapp.ops.run.build_runtime`（M4 的闸门签名已变，旧写法在 dev/milestone_4 上会失败；你本人修改）（2026-11-16 完成：分支 `fix/Post_Milestone_3` 提交 ae47027；价格系数 0.9 → 0.96，`build()` 等单实例锁释放；两条模拟盘重跑均 `1 passed`，App 核对 13:16:56 @712.48、13:18:35 @712.22 两张均已撤销）
-
-- [ ] M3：确认是否所有 `order_list_query` 都限流（目前只限 refresh=True）
-- [ ] M3：跑探针 P9：`! uv run python scripts/probe_m3_expiry.py`（美东 15:45–16:00），次日 `--check <order_id>`；App 里删一张远离市价的单后再 `--check`
-- [ ] M3：`! uv run mooapp db migrate`；常规时段 `! uv run pytest -m sim` 与 `! uv run pytest -m sim tests/acceptance/test_m3_idempotent_retry.py tests/acceptance/test_m3_restart_recovery.py`
-- [x] M3：审 diff 与两份 fixture，提交（aff9fee、600d29e）
-- [x] M3（2026-11-16）：两份 M3 验收分开跑，均通过（842592、842718，App 已核对）。原条目：两份 M3 验收与 sim 契约测试**分开跑**，中间等满 31 秒，因为限频按账户算、多个 broker 共用额度（learnings「M3 › vendor 限频按账户计算」）。建议先给验收的 `finally` 加上撤单失败的处理
-- [x] M3（周一美东 16:00 后，周二再一次）：P9 `--check` 已于 2026-11-16 10:29 完成，DAY 单过期为 CANCELLED_ALL（见「周一操作清单 › P9 结论」）；DISABLED 仍无样本
-- [ ] 决定：sim 测试里同一进程的多个 broker 是否共用限流器（进程级、按 acc_id）
-- [ ] M3：验收通过后 `/milestone-git finish 3`（tag `accept/milestone_3`）
-- [ ] 提交 `.claude/skills/milestone-git/`（你本人提交：`.claude/` 由你维护）
-
-- [ ] SPEC 8 节 M2 验收第 3 条改口径（你手工改）：模拟盘只录「整单成交 + 撤单」，部分成交由 FakeBroker 注入的推送覆盖（learnings「M2 › 模拟盘不会部分成交」）
-- [x] 提交 `docs/learnings.md`、`PROGRESS.md` 中第二次部分成交探针的结论（ef26879）
-- [ ] 审 M2 实现 diff（`src/mooapp/clock.py`、`common.py`、`broker/` 下 7 个文件）、learnings、PROGRESS，提交，`git tag m2`
-
-- [x] 核对 `config/settings.toml`：`[risk.real]` 白名单 ETF 与现价、`max_limit_deviation_pct`、`[risk.simulate]` 数值、邮件收件人
-- [x] 在 secrets 里填 `[accounts] real_acc_id`（2026-11-12 doctor 显示「real_acc_id 已填」）
-- [x] `config/settings.toml`（你在 M1 期间改过，Claude 未动）：两个白名单里的 `US.TLSA` 疑为 `US.TSLA` 的笔误；`[risk.real]` 白名单 7 只，其中 SPY、QQQ、NVDA、AMZN 单价远超 `max_order_value = 100`，与注释「1–2 只低价 ETF」不一致
-- [x] 审 M1 diff，提交，`git tag m1`
+- [ ] `/milestone-git finish 7`（你本人运行；M7 验收 2026-11-23 全部通过）
+- [ ] M8 合并进 main 后：在 main 上跑 M8 验收 1（查持仓 → 提议 → 批准 → 成交邮件）→ `/milestone-git finish 8`
+- [ ] 合并完成后：crontab 改为在 main 目录启动常驻进程（你本人改）；M5、api-guard、M8 的 worktree 何时删除由你决定（分支保留）
+- [ ] 可选：美东 16:00 后再跑一次 P11 `! uv run python scripts/probe_m6_quote.py`，看盘后的 `last_price`、`open_price`
 - [ ] 待议（REAL 阶段前）：双 OpenD 分别服务 SIMULATE 和 REAL。**原前提不成立**：vendor FAQ Q17 的同机双 OpenD 用的是两个不同的登录账户，Q8 的「一个账户多处登录」说的是多台机器；你手动实验确认（2026-11-12 约 21:00 EST 复测），同一账户在同一台 Mac 上第二次登录 OpenD 会失败，提示 `User is already logged in on this device`；命令行版、可视化版无论怎么组合都一样（learnings「阶段 1 会话 4 › vendor 要点」）。SIMULATE 与 REAL 在同一个登录账户下，所以现有账户做不到。只有满足以下附加条件之一才可行，都需要你决定：
   - 再开一个 moomoo 登录账户，只用它的模拟账户跑 SIMULATE（`simulate_acc_id` 要随之更换），原账户的 OpenD 只服务 REAL；
   - REAL 用的 OpenD 放到另一台机器上（Q8 允许），但与 ADR-0014「同一台机器、只用本机端口」冲突，需要新 ADR。
   - 选定以后，再验证「一个 OpenD 解锁后，另一个是否仍锁定」；不做双 OpenD 时维持 ADR-0015 的三条对策
+
+### 已完成（2026-11-20 清理时归并；依据是 tag、本文件的状态行和代码）
+
+- [x] M6b：迁移 0003、探针 P11（常规时段）、`test_m6_rule_oco.py` 验收（2026-11-16，tag `accept/milestone_6`）
+- [x] M4：迁移 0002、探针 P10、`[resume] key`、`test_m4_halt.py` 验收并 resume（2026-11-16，「周一操作清单」第 4、5 步；tag `accept/milestone_4`）
+- [x] M3：迁移、`pytest -m sim`、两份 M3 验收（842592、842718，App 已核对）、审 diff 并提交（aff9fee、600d29e）、`finish 3`（tag `accept/milestone_3`）；两份验收的 `build()` 改用 `build_runtime`（ae47027）
+- [x] M3：探针 P9 与 `--check`（2026-11-16 10:29，见「P9 结论」）；DISABLED 仍无样本
+- [x] M3：所有 `order_list_query` 都限流（`broker/throttle.py` 的 `query_orders` 不论 refresh 一律 acquire）
+- [x] 同一进程的多个 broker 共用限流器：M4 已实现按账户共用
+- [x] 提交 `.claude/skills/milestone-git/`（已在 Git 中）
+- [x] M2：SPEC 8 节 M2 验收第 3 条已改口径（2026-11-13）；第二次部分成交探针结论已提交（ef26879）；审 diff 并打 tag（`accept/milestone_2`）
+- [x] M1：核对 `settings.toml`、填 `real_acc_id`、白名单笔误与单价问题、审 diff 并打 tag（`accept/milestone_1`）
 
 ## 已知问题
 

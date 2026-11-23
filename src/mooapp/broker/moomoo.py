@@ -16,7 +16,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -114,15 +114,16 @@ class MoomooBroker:
 
     POSITIONS_CACHE_SECONDS = 0.5
 
-    def _position_rows(self) -> list[dict[str, Any]]:
-        # vendor § Get Positions；refresh_cache=False 走 OpenD 缓存
+    def _position_rows(self, refresh: bool = False) -> list[dict[str, Any]]:
+        # vendor § Get Positions；refresh_cache=False 走 OpenD 缓存，True 向服务器取最新值（受限频，ThrottledBroker 负责）。
+        # P12：OpenD 缓存不随下单、撤单自动更新；refresh=True 时也不用本地 0.5 秒缓存，结果写回本地缓存
         with self._pos_lock:
             now = time.monotonic()
-            if self._pos_cache is not None and now - self._pos_cache[0] < self.POSITIONS_CACHE_SECONDS:
+            if not refresh and self._pos_cache is not None and now - self._pos_cache[0] < self.POSITIONS_CACHE_SECONDS:
                 return self._pos_cache[1]
             rows = self._rows(
                 "position_list_query",
-                self._trade.position_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=False),
+                self._trade.position_list_query(trd_env=self._trd_env, acc_id=self._acc_id, refresh_cache=refresh),
             )
             self._pos_cache = (now, rows)
             return rows
@@ -244,9 +245,9 @@ class MoomooBroker:
         # vendor § Get Order Fee：不支持模拟账户（P7 实测 "Paper trading is not supported."）
         raise NotSupported("模拟盘不支持 order_fee_query（P7）")
 
-    def query_positions(self) -> list[Position]:
+    def query_positions(self, refresh: bool = False) -> list[Position]:
         # vendor § Get Positions
-        return [p for p in (position_from_row(r) for r in self._position_rows()) if p is not None]
+        return [p for p in (position_from_row(r) for r in self._position_rows(refresh)) if p is not None]
 
     def query_today_pnl(self) -> Decimal | None:
         # vendor § Get Positions › today_pl_val；走缓存（只有刷新缓存时才受限频）；全部行，含 qty=0
@@ -366,6 +367,25 @@ class MoomooBroker:
         )
         self._drift.check("request_trading_days", days)  # ADR-0035
         return len(days) > 0
+
+    def close_times(self, start: date, end: date) -> dict[date, dtime]:
+        """M7 / P8：WHOLE 16:00、MORNING 13:00（美东）；一次区间查询。"""
+        return _close_times(self._ft, self._quote, self._ok, start, end)
+
+
+_CLOSE_BY_TYPE = {"WHOLE": dtime(16, 0), "MORNING": dtime(13, 0), "AFTERNOON": dtime(16, 0)}  # P8：半日市为 MORNING
+
+
+def _close_times(ft: Any, quote: Any, ok: Callable[..., Any], start: date, end: date) -> dict[date, dtime]:
+    # vendor § Get Trading Calendar、§ TradeDateType：只排除周末和节假日，不含临时休市
+    days = ok("request_trading_days", quote.request_trading_days(market=ft.TradeDateMarket.US, start=start.isoformat(), end=end.isoformat()))
+    out: dict[date, dtime] = {}
+    for d in days:
+        kind = str(d.get("trade_date_type"))
+        if kind not in _CLOSE_BY_TYPE:
+            raise BrokerError(f"request_trading_days 返回未知的 trade_date_type：{d!r}")
+        out[date.fromisoformat(str(d["time"])[:10])] = _CLOSE_BY_TYPE[kind]
+    return out
 
 
 def open_broker(

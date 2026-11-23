@@ -220,6 +220,37 @@ def test_outbox_enqueue_due_sent_failed(store):
     assert [e.id for e in later] == [a] and later[0].attempts == 1 and later[0].last_error == "SMTP 认证失败"
 
 
+def test_fills_until_ordered_by_ts(store):
+    """M7：P&L 需要某时刻之前的全部本地成交（期初持仓与成本）。"""
+    o = mk_order()
+    with store.transaction():
+        store.insert_order(o)
+        store.insert_fill_once(replace(fl(o.client_order_id, "late", 1), ts=T + timedelta(hours=2)))
+        store.insert_fill_once(replace(fl(o.client_order_id, "early", 2), ts=T))
+        store.insert_fill_once(replace(fl(o.client_order_id, "after", 3), ts=T + timedelta(days=1)))
+    got = store.fills_until(T + timedelta(hours=3))
+    assert [f.fill_id for f in got] == ["early", "late"]
+
+
+def test_eod_reports_append_and_read(store):
+    """M7 决定 4：eod_reports 只追加；同一交易日可多次运行。"""
+    from datetime import date
+
+    from mooapp.oms.store import EodRecord
+
+    d = date(2026, 11, 13)
+    r1 = EodRecord(d, T, "SIMULATE", True, {"realized": "0.50"}, [], [{"symbol": "US.SPY", "realized": "0.50"}])
+    r2 = replace(r1, generated_at=T + timedelta(minutes=5), ok=False, breaks=[{"kind": "fill_qty_mismatch"}])
+    with store.transaction():
+        store.append_eod_report(r1)
+        store.append_eod_report(r2)
+        store.append_eod_report(replace(r1, trade_date=date(2026, 11, 12)))
+    got = store.eod_reports(d)
+    assert [g.ok for g in got] == [True, False]
+    assert got[0].rows == [{"symbol": "US.SPY", "realized": "0.50"}] and got[1].breaks == [{"kind": "fill_qty_mismatch"}]
+    assert got[0].summary == {"realized": "0.50"} and got[0].env == "SIMULATE"
+
+
 def test_recon_events(store):
     with store.transaction():
         store.append_recon("external_order", {"broker_order_id": "555"}, None, T)
