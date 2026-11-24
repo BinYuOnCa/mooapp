@@ -478,11 +478,12 @@ def write_csv(report: EodReport, out_dir: Path) -> Path   # reports/YYYY-MM-DD.c
 
 | 类别 | 工具 | 说明 |
 | --- | --- | --- |
-| 只读 | `get_quote`、`get_positions`、`get_orders`、`get_pnl`、`explain_order` | 直接读 OMS / MarketDataPort |
+| 只读 | `get_quote`、`get_positions`、`get_orders`、`get_pnl`、`explain_order`、`list_my_proposals` | 直接读 OMS / MarketDataPort（只读 OpenD 连接，M8 决定 1）；`list_my_proposals` 查自己提议的状态与结果（M8 新增）；外部文本放在 `untrusted` 字段 |
 | 提议 | `propose_order`、`propose_rule` | 只写入 `approvals` 表，返回 `approval_id`；不调用闸门 |
 | 不提供 | 修改限额、切换环境、读取配置、批准 | — |
 
 ```python
+# M8 实现：mcp 2.x 的 MCPServer（stdio）；approve 命令签名见 ADR-0034；每次工具调用写 agent_calls
 class ApprovalQueue:
     def propose(self, kind: Literal["order", "rule"], payload: dict, caller: str) -> str: ...
     def approve(self, approval_id: str, confirm_code: str | None) -> Decision: ...  # 批准后才 gate.submit(source=AGENT)

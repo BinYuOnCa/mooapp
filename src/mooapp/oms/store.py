@@ -120,6 +120,34 @@ class EodRecord:
 
 
 @dataclass(frozen=True)
+class ApprovalRecord:
+    """approvals 的一行（M8）：Agent 的提议。status：pending → approved / rejected / expired。"""
+
+    id: str
+    kind: str  # order / rule
+    payload: dict[str, Any]
+    reason: str  # Agent 给的理由（外部文本，只当数据）
+    caller: str
+    status: str
+    created_at: datetime
+    expires_at: datetime
+    decided_at: datetime | None
+    result: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class AgentCallRecord:
+    """agent_calls 的一行（M8，只追加）：每次 MCP 工具调用的输入、输出、时间、调用方。"""
+
+    tool: str
+    args: dict[str, Any]
+    result: dict[str, Any]
+    caller: str
+    ok: bool
+    ts: datetime
+
+
+@dataclass(frozen=True)
 class CommandRecord:
     """commands 表的一行（SPEC 3.4）。status：pending → running → done / error。"""
 
@@ -193,6 +221,13 @@ class Store(Protocol):
     def recon_events(self) -> list[ReconRecord]: ...
     # kv
     def get_kv(self, key: str) -> str | None: ...
+    # M8：approvals、agent_calls（只追加）
+    def insert_approval(self, a: ApprovalRecord) -> None: ...
+    def get_approval(self, approval_id: str) -> ApprovalRecord | None: ...
+    def update_approval(self, approval_id: str, status: str, decided_at: datetime, result: dict[str, Any] | None) -> None: ...
+    def list_approvals(self, status: str | None = None, since: datetime | None = None) -> list[ApprovalRecord]: ...
+    def append_agent_call(self, tool: str, args: dict[str, Any], result: dict[str, Any], caller: str, ok: bool, ts: datetime) -> None: ...
+    def agent_calls(self) -> list[AgentCallRecord]: ...
     def set_kv(self, key: str, value: str) -> None: ...
     # M5：outbox（通知邮件；常驻进程投递、退避重试）
     def enqueue_email(self, kind: str, subject: str, body: str, recipients: list[str], ts: datetime) -> int: ...
@@ -243,6 +278,8 @@ class _State:
     rule_events: list[RuleEventRecord] = field(default_factory=list)
     outbox: dict[int, OutboxRecord] = field(default_factory=dict)
     eod: list[EodRecord] = field(default_factory=list)
+    approvals: dict[str, ApprovalRecord] = field(default_factory=dict)
+    agent_calls: list[AgentCallRecord] = field(default_factory=list)
 
 
 class MemoryStore:
@@ -352,6 +389,33 @@ class MemoryStore:
         return [copy.deepcopy(r) for r in self._s.eod if r.trade_date == trade_date]
 
     # kv
+
+    # M8：approvals、agent_calls
+
+    def insert_approval(self, a: ApprovalRecord) -> None:
+        if a.id in self._s.approvals:
+            raise StoreError(f"approvals 已有 {a.id}")
+        self._s.approvals[a.id] = copy.deepcopy(a)
+
+    def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        a = self._s.approvals.get(approval_id)
+        return copy.deepcopy(a) if a is not None else None
+
+    def update_approval(self, approval_id: str, status: str, decided_at: datetime, result: dict[str, Any] | None) -> None:
+        a = self._s.approvals.get(approval_id)
+        if a is None:
+            raise StoreError(f"approvals 没有 {approval_id}")
+        self._s.approvals[approval_id] = replace(a, status=status, decided_at=decided_at, result=copy.deepcopy(result))
+
+    def list_approvals(self, status: str | None = None, since: datetime | None = None) -> list[ApprovalRecord]:
+        out = [a for a in self._s.approvals.values() if (status is None or a.status == status) and (since is None or a.created_at >= since)]
+        return [copy.deepcopy(a) for a in sorted(out, key=lambda a: (a.created_at, a.id))]
+
+    def append_agent_call(self, tool: str, args: dict[str, Any], result: dict[str, Any], caller: str, ok: bool, ts: datetime) -> None:
+        self._s.agent_calls.append(AgentCallRecord(tool, copy.deepcopy(args), copy.deepcopy(result), caller, ok, ts))
+
+    def agent_calls(self) -> list[AgentCallRecord]:
+        return copy.deepcopy(self._s.agent_calls)
 
     def get_kv(self, key: str) -> str | None:
         return self._s.kv.get(key)

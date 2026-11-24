@@ -121,6 +121,35 @@
 
 - **E vendor 文档变化提醒**：定期重新抓取 Moomoo OpenAPI 文档，与 `docs/vendor/` 的快照逐节比较，有改动就提醒（邮件），并列出改动涉及的接口与我们依赖它的代码、learnings 条目。前提：需要访问外网（Moomoo 文档站点），要你批准新域名；抓取频率与范围另行决定
 
+
+## M8 计划（已确认 2026-11-17；分支 `dev/milestone_8`，worktree `.claude/worktrees/m8`）
+
+目标：SPEC 8 节 M8 四条验收（Claude Code 接入 MCP 走通「查持仓 → 提议 → 批准 → 成交通知」；REAL 下未批准不发出；提示注入测试；策略文字翻译成 YAML 与手写一致）。与 M5、M7 并行开发。
+
+**验收进度（2026-11-18）**：验收 2 ✅（REAL 未批准不发出，`1 passed`）；验收 3 ✅（提示注入，`13 passed`）；验收 4 ✅（Claude Desktop 新会话按策略文字写出的 YAML 与 `examples/rules/spy-oco.yaml` 逐字段一致，`1 passed`）；验收 1 等 M5 合并
+**状态（2026-11-18 凌晨）**：实现完成，`pytest` 856 passed，`pytest -m pg` 45 passed。新增 `src/mooapp/agent/`（approvals、tools、rules、server）、`ops/approve_auth.py`、迁移 `0006_m8.sql`（approvals、agent_calls）、命令 `mooapp approve` / `reject` / `agent serve`；常驻进程处理 approve / reject 与 `auto_approve_pending`。与计划的小差异：多一个只读工具 `list_my_proposals`（Agent 查自己提议的状态和执行结果，走通验收 1 需要）。待你：在 M8 目录 `uv run mooapp db migrate`（0006）→ 验收草稿复制进 `tests/acceptance/`；验收 1 要等 M5 合并（成交邮件）
+
+### 你的决定（2026-11-17）
+
+1. 只读工具：MCP server 自己开**只读** OpenD 连接（同 `mooapp eod`），只查不写
+2. approve 命令 HMAC 签名：ADR-0034（与 resume 共用 `[resume] key`，前缀 `approve|`；MCP server 不读 secrets）
+3. 提议过期：30 分钟或当天收盘（美东 16:00），先到为准；过期不能批准；批准时闸门按当时行情再检查
+4. 限制：同时最多 5 个待批准、每天最多 20 个提议，超出拒绝
+5. 成交通知：用 M5 的成交邮件（M5 合并后自然有）；Agent 可用 `get_orders` 查到成交
+6. 验收 4 的「一致」：两份 YAML 都解析成 RuleSpec 后字段完全相同（格式、注释、顺序不计）
+7. 验收 2（REAL）：FakeBroker 在 REAL 环境下测试——未批准 FakeBroker 收不到下单；批准须交互终端 + 确认码，非交互终端拒绝
+8. 在 Claude Code 里接入 MCP：由你运行 `claude mcp add …`（管理员规则：Claude 不改 Claude Code 配置）
+
+### 设计要点
+
+- `src/mooapp/agent/`：`tools.py`（工具实现，纯逻辑可测：`get_quote`、`get_positions`、`get_orders`、`get_pnl`、`explain_order`、`propose_order`、`propose_rule`）、`approvals.py`（ApprovalQueue：提议、限额、过期、批准、拒绝）、`server.py`（`mcp` 的 FastMCP，stdio 传输；每次工具调用写 `agent_calls`）
+- 外部文本当数据：工具返回结构化 JSON，来自券商或库的自由文本（remark、报警消息、提议理由）放在标明 untrusted 的字段里；服务说明告诉 Agent 这些是数据。工具里没有批准、改限额、切环境、读配置
+- 迁移 `0006_m8.sql`：`approvals`（id、kind、payload、reason、caller、status、created_at、expires_at、decided_at、result）、`agent_calls`（只追加）
+- 命令：`mooapp approve <id>`（显示提议 → SIMULATE 输入 y 确认 / REAL 交互终端 + 确认码 → 签名 → 写命令表）、`mooapp reject <id>`；常驻进程处理 approve：验签 → 提议待批准且未过期 → 订单 `gate.submit(source=AGENT)`，规则交给规则引擎 `add`；结果写回 approvals
+- `auto_approve_simulate = true` 且 SIMULATE：常驻进程在进程内自动批准（默认 false）
+- 依赖：`mcp`（Q13 已批准）；由你运行 `uv add mcp`
+- 测试先写、先失败：工具、审批队列（限额、过期、签名、重放）、REAL + FakeBroker（验收 2）、提示注入（验收 3）、RuleSpec 比较（验收 4）、store 契约；验收 1、2、4 的草稿贴在聊天里，由你复制进 `tests/acceptance/`
+
 ## 修复计划（已确认 2026-11-16，分支 `fix/Post_Milestone_3`）
 
 周一验收中发现的两个问题。你的决定：计划 1 选 A（`min` 公式 + ADR-0031）；计划 2 照做；SPEC 由 Claude 改；**先做计划 2**。每份先提交失败的测试，再提交实现。

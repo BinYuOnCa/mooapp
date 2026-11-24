@@ -519,3 +519,108 @@ def eod(
             raise first
     if not report.ok:
         raise typer.Exit(EXIT_BREAK)
+
+
+# ------------------------------------------------------------------ M8：Agent 提议的批准、拒绝；MCP server（PROGRESS「M8 计划」）
+
+
+def _load_approval(env: Env, approval_id: str):  # type: ignore[no-untyped-def]
+    """只读：从库里取提议（命令行进程不写 approvals，批准由常驻进程执行）。"""
+    from mooapp.oms.pg_store import PostgresStore
+
+    other = _SCHEMA[Env.REAL if env is Env.SIMULATE else Env.SIMULATE]
+    store = PostgresStore(_dsn(env), schema=_SCHEMA[env], other_schema=other)
+    try:
+        return store.get_approval(approval_id)
+    finally:
+        store.close()
+
+
+@app.command()
+def approve(ctx: typer.Context, approval_id: str) -> None:
+    """批准 Agent 的提议：显示内容 → 确认（REAL：交互终端 + 确认码）→ 签名（ADR-0034）→ 由 mooapp run 经闸门执行。"""
+    from datetime import UTC, datetime
+
+    from mooapp.config.loader import load_secrets
+    from mooapp.ops.approve_auth import approve_payload
+
+    env: Env = ctx.obj
+    try:
+        a = _load_approval(env, approval_id)
+    except ConfigError as e:
+        typer.echo(f"配置错误：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    if a is None:
+        typer.echo(f"没有提议 {approval_id}", err=True)
+        raise typer.Exit(EXIT_COMMAND)
+    if a.status != "pending":
+        typer.echo(f"提议 {approval_id} 已是 {a.status}，不能批准", err=True)
+        raise typer.Exit(EXIT_COMMAND)
+    typer.echo(f"提议 {a.id}（{a.kind}，来自 {a.caller}）")
+    typer.echo(f"  内容：{a.payload}")
+    typer.echo(f"  理由（Agent 写的，只供参考）：{a.reason}")
+    if env is Env.REAL:
+        try:
+            humanlock.confirm_interactively(sys.stdin, sys.stdout, input, None, f"批准提议 {a.id}")
+        except humanlock.HumanLockError as e:
+            typer.echo(str(e), err=True)
+            raise typer.Exit(EXIT_HUMAN_LOCK) from None
+    elif not typer.confirm("批准这个提议？", default=False):
+        typer.echo("已取消，未批准")
+        return
+    try:
+        key = load_secrets(deps.secrets_path).resume_key
+    except ConfigError as e:
+        typer.echo(f"读不到 secrets：{e}", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    if key is None or not key.get_secret_value():
+        typer.echo("secrets 里没有 [resume] key（ADR-0034 与 resume 共用），无法签名", err=True)
+        raise typer.Exit(EXIT_CONFIG)
+    try:
+        raw = bytes.fromhex(key.get_secret_value())
+    except ValueError:
+        typer.echo("[resume] key 不是十六进制字符串", err=True)
+        raise typer.Exit(EXIT_CONFIG) from None
+    r = _submit(ctx, "approve", approve_payload(raw, a.id, datetime.now(UTC)))
+    typer.echo(f"结果：{r}")
+
+
+@app.command()
+def reject(ctx: typer.Context, approval_id: str, reason: Annotated[str, typer.Option("--reason", help="拒绝理由")] = "人工拒绝") -> None:
+    """拒绝 Agent 的提议（不需要签名：拒绝不会下单）。"""
+    r = _submit(ctx, "reject", {"approval_id": approval_id, "reason": reason})
+    typer.echo(f"结果：{r}")
+
+
+agent_app = typer.Typer(help="Trading Agent（M8）：MCP server。", no_args_is_help=True)
+app.add_typer(agent_app, name="agent")
+
+
+@agent_app.command("serve")
+def agent_serve(ctx: typer.Context) -> None:
+    """启动 MCP server（stdio），由 Claude Code 作为子进程启动。只读查询 + 提议；只开只读的 OpenD 连接（M8 决定 1）。"""
+    from mooapp.agent.approvals import ApprovalQueue
+    from mooapp.agent.server import build_server
+    from mooapp.agent.tools import AgentTools
+    from mooapp.broker.moomoo import open_broker
+    from mooapp.clock import SystemClock
+    from mooapp.oms.pg_store import PostgresStore
+
+    env: Env = ctx.obj
+    if env is not Env.SIMULATE:
+        typer.echo("M8 的 MCP server 只支持 SIMULATE", err=True)
+        raise typer.Exit(EXIT_CONFIG)
+    clock = SystemClock()
+    store = PostgresStore(_dsn(env), schema=_SCHEMA[env], other_schema=_SCHEMA[Env.REAL])
+    try:
+        broker = open_broker(env, load_broker_cfg(deps.config_dir / "broker.toml"), clock)
+    except BaseException:
+        store.close()
+        raise
+    try:
+        tools = AgentTools(store=store, broker=broker, md=broker, queue=ApprovalQueue(store, clock), clock=clock, env=env, caller="agent:mcp")
+        build_server(tools).run("stdio")
+    finally:
+        broker.close()
+        store.close()
+

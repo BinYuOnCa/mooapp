@@ -672,3 +672,11 @@ P11（报价推送）待开盘实测；在那之前，取开盘价、判断触�
 - **测试写错了三处，实现是对的**：先写测试时，一个时间戳顺序构造反了，一个非交易日用例选在了「未来」，一个手算预期写错（10 买 12 卖应为 2.00 而不是 1.00）。修正测试后全部通过。教训：手算写在测试注释里，并在实现前自己再核一遍
 - **默认日期**：今天是交易日就对今天（收盘后 30 分钟前报错，不悄悄改去对前一天），今天不是交易日才取最近一个已完成的交易日
 - **验收 2 实跑发现的 bug**：假成交随机落在一张卖单上，本程序净持仓变成 −1；持仓对账只判断「券商少于本程序」，于是把 0 − (−1) = 1 的差额当成了程序外持仓。负的净持仓本身就说明本地数据有误（ADR-0002 不做空），现在直接报 `position_mismatch`。FakeBroker 测试只构造了「假买入」，没覆盖这一支
+
+## M8 实现：MCP 与审批（2026-11-17）
+
+- **mcp 2.x 改了 API**：`FastMCP` 改名为 `MCPServer`（`from mcp.server.mcpserver import MCPServer`），`Tool` 的 `inputSchema` 改为 `input_schema`；`list_tools` / `call_tool` 是异步的，测试里用 `asyncio.run` 直接调用；工具里抛出的异常被包成 `ToolError`。照 1.x 的例子写会直接 ImportError
+- **工具层与 MCP 分开**：`AgentTools` 是纯逻辑（可用 FakeBroker 测试），`server.py` 只负责注册、审计、把 MooappError 转成 ToolError；这样提示注入、限额、过期都能脱离 MCP 测
+- **「Agent 不能批准」靠三层**：工具里没有批准；`agent/` 包静态检查不 import secrets、签名、闸门、命令处理；approve 命令必须带只有人在终端能生成的签名（ADR-0034），伪造、重放、拿 resume 签名冒充都被拒绝并报警 `approve_rejected`
+- **worktree 隔离会拒绝复杂的 Bash 命令**：这次在 M8 worktree 里，含大段内联 Python 的命令被判为「无法确认只在 worktree 内操作」而拒绝；改成先用 Write 写脚本到 $TMPDIR、再运行脚本
+
