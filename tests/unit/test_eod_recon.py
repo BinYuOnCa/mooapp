@@ -263,6 +263,42 @@ def test_report_csv_rounded_to_cents(tmp_path):
     assert (spy["qty"], spy["realized"], spy["unrealized"], spy["fees"]) == ("1", "0.50", "0.20", "0.00")
 
 
+def test_broker_today_pl_for_sold_out_symbol(tmp_path):
+    """当天卖光（qty=0 的行被 query_positions 丢掉）仍要填券商 today_pl_val 参考列，取自持仓刷新之后的缓存。"""
+    sys = make_system()
+    cid = sys.place(qty=1).order.client_order_id
+    sys.broker.step()
+    sys.broker.fill(sys.oms.get(cid).broker_order_id, 1, D("10.00"))
+    sys.pump.drain()
+    sell = sys.place(qty=1, side=Side.SELL, price="10.50").order.client_order_id
+    sys.broker.step()
+    sys.broker.fill(sys.oms.get(sell).broker_order_id, 1, D("10.50"))
+    sys.pump.drain()
+    sys.broker.set_today_pnl_by_symbol({"US.SPY": D("0.50")})
+    close_market(sys)
+    order: list[str] = []
+    for name in ("query_positions", "query_today_pnl_by_symbol"):
+        inner = getattr(sys.broker, name)
+        setattr(sys.broker, name, lambda *a, _n=name, _f=inner, **k: (order.append(_n), _f(*a, **k))[1])
+    r = eod(sys)
+    assert r.ok and r.rows["US.SPY"].qty == 0
+    assert r.broker_today_pl == {"US.SPY": D("0.50")}
+    assert order == ["query_positions", "query_today_pnl_by_symbol"]  # 先刷新持仓，再读缓存
+    spy = next(row for row in csv.DictReader(write_csv(r, tmp_path).open(encoding="utf-8")) if row["symbol"] == "US.SPY")
+    assert spy["broker_today_pl"] == "0.50"
+
+
+def test_broker_today_pl_empty_for_previous_trading_day():
+    """补跑上一个交易日：券商 today_pl_val 是今天的，不能填进去。"""
+    sys = make_system()
+    trade_day(sys)
+    sys.broker.set_today_pnl_by_symbol({"US.SPY": D("0.70")})
+    mon_noon = datetime(2026, 11, 16, 17, 0, tzinfo=UTC)
+    to(sys, mon_noon)
+    sys.broker.set_quote("US.SPY", last=D("10.40"), prev_close=D("10.20"), ts=mon_noon)
+    assert eod(sys).broker_today_pl == {}
+
+
 def test_report_saved_append_only():
     sys = make_system()
     trade_day(sys)

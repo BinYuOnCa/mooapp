@@ -19,6 +19,7 @@ from mooapp.broker.convert import (
     parse_et_time,
     position_from_row,
     quote_from_row,
+    today_pnl_by_symbol_from_rows,
 )
 from mooapp.broker.port import TERMINAL_STATUSES, BrokerError, BrokerOrder
 from mooapp.common import OrderKind, Side
@@ -179,6 +180,21 @@ def test_position_from_row():
 def test_position_zero_qty_is_none():
     # 卖光后 position_list_query 仍返回 qty=0 的行（learnings M2 其他发现）
     assert position_from_row({**POSITION_ROW, "qty": 0.0, "can_sell_qty": 0.0, "average_cost": 0.0}) is None
+
+
+def test_today_pnl_by_symbol_includes_zero_qty_rows():
+    # 卖光后 qty=0 的行仍带 today_pl_val（learnings P10a、P10b）；eod 的 broker_today_pl 参考列要用它
+    rows = [
+        {**POSITION_ROW, "qty": 0.0, "can_sell_qty": 0.0, "today_pl_val": 0.09},
+        {**POSITION_ROW, "code": "US.QQQ", "today_pl_val": -1.5},
+    ]
+    assert today_pnl_by_symbol_from_rows(rows) == {"US.SPY": Decimal("0.09"), "US.QQQ": Decimal("-1.5")}
+
+
+@pytest.mark.parametrize("bad", ["N/A", None])
+def test_today_pnl_by_symbol_invalid_is_none_not_zero(bad):
+    assert today_pnl_by_symbol_from_rows([{**POSITION_ROW, "today_pl_val": bad}]) == {"US.SPY": None}
+    assert today_pnl_by_symbol_from_rows([POSITION_ROW]) == {"US.SPY": None}  # 字段缺失
 
 
 @pytest.mark.parametrize("bad", ["N/A", None])

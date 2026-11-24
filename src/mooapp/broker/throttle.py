@@ -161,6 +161,9 @@ class ThrottledBroker:
     def query_today_pnl(self) -> Decimal | None:
         return self.inner.query_today_pnl()
 
+    def query_today_pnl_by_symbol(self) -> dict[str, Decimal | None]:
+        return self.inner.query_today_pnl_by_symbol()  # 读缓存，不占刷新限频
+
     def query_cash(self) -> Cash:
         return self.inner.query_cash()
 

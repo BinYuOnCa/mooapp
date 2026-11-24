@@ -90,6 +90,8 @@ def run_eod(trade_date: date | None, store: Store, broker: BrokerPort, md: Marke
     own_cids = {o.client_order_id for o in store.list_orders(open_only=False)}
     day_orders = _broker_orders(broker, d, today, start, end)
     positions = broker.query_positions(refresh=True)  # vendor § Get Positions（P12）
+    # 参考列：query_positions 丢掉 qty=0 的行，当天卖光的标的要从全部行取；紧跟上面的刷新读缓存，与对账持仓同一时刻
+    broker_today_pl = broker.query_today_pnl_by_symbol() if d == today else {}  # vendor § Get Positions › today_pl_val
 
     held = {s for s, r in compute_pnl(fills, start, end, {}).items() if r.qty}
     closes: dict[str, Decimal] = {}
@@ -126,7 +128,7 @@ def run_eod(trade_date: date | None, store: Store, broker: BrokerPort, md: Marke
         breaks=breaks,
         info={"unknown_orders": rec.unknown_orders, "external_qty": rec.external_qty},
         close_sources=sources,
-        broker_today_pl={p.symbol: p.today_pl_val for p in positions} if d == today else {},
+        broker_today_pl=broker_today_pl,
         notes=notes,
     )
 

@@ -131,6 +131,14 @@ def position_from_row(row: Mapping[str, Any]) -> Position | None:
     )
 
 
+def today_pnl_by_symbol_from_rows(rows: list[Mapping[str, Any]]) -> dict[str, Decimal | None]:
+    """vendor § Get Positions › today_pl_val，按标的；含 qty=0 的行（当天卖光，learnings P10a、P10b）。
+
+    缺失、N/A、NaN → None，不当 0。只给 eod 的 broker_today_pl 参考列用。
+    """
+    return {str(_req(row, "code")): _opt_dec(row.get("today_pl_val"), "today_pl_val") for row in rows}
+
+
 def today_pnl_from_rows(rows: list[Mapping[str, Any]]) -> Decimal | None:
     """vendor § Get Positions › today_pl_val 之和，含 qty=0 的行（当天卖光的盈亏，learnings M2：卖光后行仍在）。
 

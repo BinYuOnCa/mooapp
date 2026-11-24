@@ -31,6 +31,7 @@ from mooapp.broker.convert import (
     position_from_row,
     quote_from_push_row,
     quote_from_row,
+    today_pnl_by_symbol_from_rows,
     today_pnl_from_rows,
 )
 from mooapp.broker.port import (
@@ -252,6 +253,10 @@ class MoomooBroker:
     def query_today_pnl(self) -> Decimal | None:
         # vendor § Get Positions › today_pl_val；走缓存（只有刷新缓存时才受限频）；全部行，含 qty=0
         return today_pnl_from_rows(self._position_rows())
+
+    def query_today_pnl_by_symbol(self) -> dict[str, Decimal | None]:
+        # vendor § Get Positions › today_pl_val；走缓存；全部行，含 qty=0（learnings P10a、P10b）
+        return today_pnl_by_symbol_from_rows(self._position_rows())
 
     def query_cash(self) -> Cash:
         # vendor § Get Account Funds：currency 只对综合账户生效；与 M1 一致显式传 USD
