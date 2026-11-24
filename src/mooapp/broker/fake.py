@@ -109,6 +109,7 @@ class FakeBroker:
         self._place_failures: deque[tuple[BrokerError, bool]] = deque()
         self._next_deal = 1
         self._today_pnl: Decimal | None = Decimal(0)  # M4：query_today_pnl 的返回值，测试用 set_today_pnl 设置
+        self._today_pnl_by_symbol: dict[str, Decimal | None] = {}  # eod 参考列；测试用 set_today_pnl_by_symbol 设置
         self._quote_cbs: list[tuple[frozenset[str], Callable[[Quote], None]]] = []  # M6b
 
     # ------------------------------------------------------------------ 测试辅助（M3）
@@ -186,6 +187,11 @@ class FakeBroker:
         """M4：设定当日盈亏（None 表示 today_pl_val 无效）。FakeBroker 不按成交推算盈亏。"""
         with self._lock:
             self._today_pnl = value
+
+    def set_today_pnl_by_symbol(self, values: dict[str, Decimal | None]) -> None:
+        """设定按标的的 today_pl_val（可含已卖光的标的）。与 set_today_pnl 独立，FakeBroker 不互相推算。"""
+        with self._lock:
+            self._today_pnl_by_symbol = dict(values)
 
     def step(self) -> None:
         """处理排队的状态变化并推送。"""
@@ -373,6 +379,11 @@ class FakeBroker:
         with self._lock:
             self._record("query_today_pnl")
             return self._today_pnl
+
+    def query_today_pnl_by_symbol(self) -> dict[str, Decimal | None]:
+        with self._lock:
+            self._record("query_today_pnl_by_symbol")
+            return dict(self._today_pnl_by_symbol)
 
     def query_cash(self) -> Cash:
         with self._lock:
