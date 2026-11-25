@@ -64,6 +64,7 @@ class Runtime:
     notifier: Any = None  # M5：notify.notifier.Notifier（[notify.email] enabled 时）；启动恢复之前开始订阅
     closers: list[Callable[[], None]] = field(default_factory=list)
     startup_alerts: list[Alert] = field(default_factory=list)  # build_runtime 产生的报警（ADR-0035 版本变化），通知器订阅后再发
+    auto_approve: bool = False  # SPEC Q9：[agent] auto_approve_simulate；REAL 永不自动批准（由 auto_approve_pending 判断）
     _stop: threading.Event = field(default_factory=threading.Event)
     _thread: threading.Thread | None = None
     _hb_thread: threading.Thread | None = None
@@ -92,6 +93,8 @@ class Runtime:
         self._thread = threading.Thread(target=self._command_loop, name="mooapp-commands", daemon=True)
         self._thread.start()
         log.info("mooapp run 已启动（%s）", self.env.value)
+        if self.auto_approve and self.env is Env.SIMULATE:
+            log.info("SIMULATE 自动批准已开启（[agent] auto_approve_simulate = true）：Agent 提议不用 mooapp approve")
 
     def _beat(self) -> None:
         # 直接写数据库（不经 journal）：库不可用时命令行本来就连不上，心跳写进 journal 只会每秒堆一条
@@ -117,6 +120,7 @@ class Runtime:
                     self.engine.poll_stale_quotes()  # 行情兜底（只排队，由事件线程执行）
                 while not self._stop.is_set() and self.processor.process_one():
                     pass
+                self._auto_approve_tick()
                 if self.listen is not None:
                     self.listen(COMMAND_WAKE_SECONDS)  # M4 审查 #6：放在 try 里，LISTEN 断开不让命令线程退出
                 else:
@@ -125,6 +129,14 @@ class Runtime:
                 log.exception("命令线程出错")
                 self.bus.publish(Alert("runner_error", f"{type(e).__name__}：{e}"))
                 self._stop.wait(COMMAND_WAKE_SECONDS)
+
+    def _auto_approve_tick(self) -> None:
+        """Q9：提议不写命令表、不触发 LISTEN，所以每轮都查一次；出错交给命令线程的报警与重试，不吞。"""
+        if not self.auto_approve:
+            return
+        n = self.processor.auto_approve_pending(self.env, True)
+        if n:
+            log.info("自动批准 %d 个 Agent 提议（auto_approve_simulate）", n)
 
     def stop(self) -> None:
         """依次停止；每一步出错都记日志，最后把第一个错误原样抛出（不吞）。"""
@@ -244,6 +256,7 @@ def build_runtime(env: Env, config_dir: Path, record_dir: Path | None = None, jo
     return Runtime(
         env=env, clock=clock, broker=broker, md=broker, store=store, bus=bus, oms=oms, pump=pump, poller=poller,  # type: ignore[arg-type]
         executor=executor, gate=gate, processor=processor, engine=engine, listen=listen, closers=closers, notifier=notifier, startup_alerts=startup_alerts,
+        auto_approve=settings.agent.auto_approve_simulate,
     )  # fmt: skip
 
 

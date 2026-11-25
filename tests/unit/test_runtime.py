@@ -117,6 +117,72 @@ def test_build_runtime_wires_notifier_with_raw_store():
 # ------------------------------------------------------------------ 合并 api-guard 后：启动报警在通知器订阅之后发出
 
 
+# ------------------------------------------------------------------ Q9：auto_approve_simulate 接进常驻进程
+
+AGENT_ORDER = {"symbol": "US.SPY", "side": "BUY", "qty": 1, "limit_price": "10.00"}
+
+
+def _wait_status(rt: Runtime, approval_id: str, want: str, timeout: float = 5.0) -> str:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while (got := rt.store.get_approval(approval_id).status) != want and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return got
+
+
+def test_auto_approve_simulate_runner_approves_pending_and_places_via_gate():
+    """新提议不写命令表，不会唤醒 LISTEN：常驻进程每轮要自己检查待批准的提议。"""
+    from mooapp.agent.approvals import ApprovalQueue
+
+    rt = runtime()
+    rt.auto_approve = True
+    rt.start()
+    try:
+        a = ApprovalQueue(rt.store, rt.clock).propose("order", AGENT_ORDER, "测试", caller="agent:test")
+        assert _wait_status(rt, a.id, "approved") == "approved"
+        assert len(rt.broker.calls("place_order")) == 1
+    finally:
+        rt.stop()
+
+
+def test_auto_approve_off_leaves_proposal_pending():
+    from mooapp.agent.approvals import ApprovalQueue
+
+    rt = runtime()
+    rt.start()
+    try:
+        a = ApprovalQueue(rt.store, rt.clock).propose("order", AGENT_ORDER, "测试", caller="agent:test")
+        assert _wait_status(rt, a.id, "approved", timeout=2.5) == "pending"
+        assert rt.broker.calls("place_order") == []
+    finally:
+        rt.stop()
+
+
+def test_auto_approve_never_in_real():
+    from mooapp.agent.approvals import ApprovalQueue
+
+    rt = runtime()
+    rt.env = Env.REAL
+    rt.auto_approve = True
+    a = ApprovalQueue(rt.store, rt.clock).propose("order", AGENT_ORDER, "测试", caller="agent:test")
+    rt._auto_approve_tick()
+    assert rt.store.get_approval(a.id).status == "pending"
+    assert rt.broker.calls("place_order") == []
+
+
+def test_build_runtime_wires_auto_approve_from_settings():
+    """静态检查：build_runtime 把 settings.agent.auto_approve_simulate 传给 Runtime（build_runtime 本身要连 OpenD 和数据库）。"""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[2] / "src" / "mooapp" / "ops" / "run.py").read_text(encoding="utf-8")
+    calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "Runtime"]
+    assert calls
+    kw = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+    assert kw.get("auto_approve") == "settings.agent.auto_approve_simulate"
+
+
 def test_startup_alerts_published_after_notifier_subscribes():
     """ADR-0035 的 SIMULATE 版本报警在 build_runtime 里产生，要等通知器订阅后再发，否则进不了邮件。"""
     from mooapp.oms.events import Alert
