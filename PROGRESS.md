@@ -1,6 +1,8 @@
 # PROGRESS
 
-**当前（2026-11-20，分支 `dev/milestone_7`）**：M1–M6 已验收（tag `accept/milestone_1` 至 `accept/milestone_6`）；M5、`fix/api-guard`、`fix/runner-quiet` 已合并进 main。**M7 验收全部通过（2026-11-23）**，验收 3 连续 5 个交易日零差异（见「M7 验收 3 登记」）。之后的顺序：你运行 `/milestone-git finish 7` → 合并 M8 进 main（追加型冲突，合并后 `uv sync`、`pytest`、`pytest -m pg`）→ 在 main 上跑 M8 验收 1 → `finish 8` → 开 fix 分支做 C2（ADR-0036）→ 从 main 拉 `dev/milestone_9`。合并步骤、C2 结论、M9 计划和已定决策见 `var/plans/2026-11-19-m9-merge-c.md`（在 `var/`，不进 Git；合并时写进 PROGRESS）
+**当前（2026-11-26，main）**：M1–M8 验收全部通过（M8 见「M8 验收全部通过」），待你 `/milestone-git finish 8`。M8 后的修复：`fix/eod-broker-today-pl`、`fix/auto-approve-wiring` 已合并；下一步 `fix/approval-expired-status`，然后 ADR-0038（先探针）
+
+**此前（2026-11-20，分支 `dev/milestone_7`）**：M1–M6 已验收（tag `accept/milestone_1` 至 `accept/milestone_6`）；M5、`fix/api-guard`、`fix/runner-quiet` 已合并进 main。**M7 验收全部通过（2026-11-23）**，验收 3 连续 5 个交易日零差异（见「M7 验收 3 登记」）。之后的顺序：你运行 `/milestone-git finish 7` → 合并 M8 进 main（追加型冲突，合并后 `uv sync`、`pytest`、`pytest -m pg`）→ 在 main 上跑 M8 验收 1 → `finish 8` → 开 fix 分支做 C2（ADR-0036）→ 从 main 拉 `dev/milestone_9`。合并步骤、C2 结论、M9 计划和已定决策见 `var/plans/2026-11-19-m9-merge-c.md`（在 `var/`，不进 Git；合并时写进 PROGRESS）
 
 **M6b（已完成，tag `accept/milestone_6`）**：2026-11-14 审查修复完成（见「M6b 审查修复」），`pytest` 727 passed，`pytest -m pg` 42 passed；死锁测试和常驻进程测试连跑 5 次都通过。待开盘：`mooapp db migrate`（0003）→ 探针 P11 → 验收 `tests/acceptance/test_m6_rule_oco.py`。下一步 `/milestone-git commit 6`
 **M4 审查修复已合并进本分支**（2026-11-14，fb1580e、4edf086）：解决了 7 个文件的冲突（规则引擎和 resume 签名共用 `CommandProcessor`；`poll_stale_quotes` 留在命令线程，心跳改为独立线程）。`pytest` 755 passed，`pytest -m pg` 43 passed；常驻进程和规则引擎的线程测试连跑 5 次都通过
@@ -127,6 +129,12 @@
 目标：SPEC 8 节 M8 四条验收（Claude Code 接入 MCP 走通「查持仓 → 提议 → 批准 → 成交通知」；REAL 下未批准不发出；提示注入测试；策略文字翻译成 YAML 与手写一致）。与 M5、M7 并行开发。
 
 **验收进度（2026-11-18）**：验收 2 ✅（REAL 未批准不发出，`1 passed`）；验收 3 ✅（提示注入，`13 passed`）；验收 4 ✅（Claude Desktop 新会话按策略文字写出的 YAML 与 `examples/rules/spy-oco.yaml` 逐字段一致，`1 passed`）；验收 1 等 M5 合并
+
+**M8 验收全部通过（2026-11-25）**：
+- 验收 1 ✅（main 2fdae58，`auto_approve_simulate = false`）：Claude Code 经 MCP `get_positions` 查持仓 → `get_quote` 取卖一价 702.08 → `propose_order` 提议 `8e0f86bcfb95`（买 1 股 US.SPY 限价 702.11，10:11（美东））→ 停在 pending → 你在终端 `mooapp approve` → 闸门放行，成交 @702.02 → 收到 M5 成交邮件 → `list_my_proposals` 显示 approved。同日另一笔 `c112c3fef6c0`（市价卖 NVDA 6 股）同样走通并收到邮件
+- 2026-11-26 在 main 上复跑验收 2、3、4：`tests/acceptance/test_m8_*.py` `15 passed`
+- 附带验证 `fix/auto-approve-wiring`：开关为 true 时提议 `5f7ab51c4149` 约 1 秒内自动批准并成交 @699.585（09:35（美东））
+- 验收中发现、另行处理：① 过期未批准的提议（`476854aaf7e5`）一直显示 pending → `fix/approval-expired-status`；② 本程序卖出 App 买入的 NVDA，11-25 EOD 预计报 `local_anomaly` + `position_mismatch` → ADR-0038
 **状态（2026-11-18 凌晨）**：实现完成，`pytest` 856 passed，`pytest -m pg` 45 passed。新增 `src/mooapp/agent/`（approvals、tools、rules、server）、`ops/approve_auth.py`、迁移 `0006_m8.sql`（approvals、agent_calls）、命令 `mooapp approve` / `reject` / `agent serve`；常驻进程处理 approve / reject 与 `auto_approve_pending`。与计划的小差异：多一个只读工具 `list_my_proposals`（Agent 查自己提议的状态和执行结果，走通验收 1 需要）。待你：在 M8 目录 `uv run mooapp db migrate`（0006）→ 验收草稿复制进 `tests/acceptance/`；验收 1 要等 M5 合并（成交邮件）
 
 ### 你的决定（2026-11-17）
@@ -683,8 +691,11 @@ OpenD 不可达：5 秒内输出一行「无法连接 OpenD 127.0.0.1:11111（5 
 
 ### 未完成
 
-- [ ] `/milestone-git finish 7`（你本人运行；M7 验收 2026-11-23 全部通过）
-- [ ] M8 合并进 main 后：在 main 上跑 M8 验收 1（查持仓 → 提议 → 批准 → 成交邮件）→ `/milestone-git finish 8`
+- [x] `/milestone-git finish 7`（tag `accept/milestone_7`）
+- [x] M8 合并进 main（161dfba）；在 main 上跑 M8 验收 1（2026-11-25 通过，见「M8 验收全部通过」）
+- [ ] `/milestone-git finish 8`（你本人运行）
+- [ ] `fix/approval-expired-status`：过期未批准的提议标为 expired（计划已确认 2026-11-26）
+- [ ] ADR-0038：本程序与程序外互相卖出对方的持仓（Q1–Q4 按建议，2026-11-26 确认）→ 先探针 `scripts/probe_external_orders.py` → 再实现对账、盈亏
 - [ ] 合并完成后：crontab 改为在 main 目录启动常驻进程（你本人改）；M5、api-guard、M8 的 worktree 何时删除由你决定（分支保留）
 - [ ] 可选：美东 16:00 后再跑一次 P11 `! uv run python scripts/probe_m6_quote.py`，看盘后的 `last_price`、`open_price`
 - [ ] 待议（REAL 阶段前）：双 OpenD 分别服务 SIMULATE 和 REAL。**原前提不成立**：vendor FAQ Q17 的同机双 OpenD 用的是两个不同的登录账户，Q8 的「一个账户多处登录」说的是多台机器；你手动实验确认（2026-11-12 约 21:00 EST 复测），同一账户在同一台 Mac 上第二次登录 OpenD 会失败，提示 `User is already logged in on this device`；命令行版、可视化版无论怎么组合都一样（learnings「阶段 1 会话 4 › vendor 要点」）。SIMULATE 与 REAL 在同一个登录账户下，所以现有账户做不到。只有满足以下附加条件之一才可行，都需要你决定：
